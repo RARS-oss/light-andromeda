@@ -9,3 +9,4 @@ description = "Control plane: VPC/endpoint model, TOML fabric config, and overla
 andromeda-core = { workspace = true }
 serde = { workspace = true }
 toml = "0.8"
+rustc-hash = "2"

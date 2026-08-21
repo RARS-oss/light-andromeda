@@ -14,7 +14,7 @@
 //! reused scratch buffer, so the steady state is allocation-free.
 
 use andromeda_control::Fabric;
-use andromeda_core::ethernet::{self, EthFrame, EthFrameMut, MacAddr};
+use andromeda_core::ethernet::{self, EthFrame, MacAddr};
 use andromeda_core::ipv4::Ipv4View;
 use andromeda_core::overlay::{self, EncapParams};
 use andromeda_core::{arp, five_tuple_of};
@@ -41,6 +41,10 @@ pub struct PipelineConfig {
     /// overlay gateway). Tenants send to this MAC; the switch rewrites the inner
     /// destination MAC to the real endpoint during encapsulation.
     pub virtual_gateway_mac: MacAddr,
+    /// Compute the outer UDP checksum on encapsulation. Default `false` (transmit 0,
+    /// legal for IPv4 tunnels per RFC 6935 and standard for VXLAN) keeps the hot path
+    /// off a full pass over the payload. Set `true` for strict outer integrity.
+    pub outer_udp_checksum: bool,
 }
 
 /// The outcome of feeding one frame to the pipeline.
@@ -67,14 +71,30 @@ pub struct PipelineStats {
     pub passed: u64,
 }
 
-/// The forwarding engine: fabric map + NAT + config + reusable scratch.
+/// The forwarding engine: fabric map + NAT + config.
 pub struct Pipeline {
     cfg: PipelineConfig,
     pub fabric: Fabric,
     pub nat: NatEngine,
-    scratch: Vec<u8>,
     ip_id: u16,
     stats: PipelineStats,
+}
+
+/// Compute the 16-bit ECMP flow hash from a parsed inner IPv4 header (0 if the L4
+/// protocol has no ports, e.g. ICMP).
+fn flow_hash_of(ip: &Ipv4View) -> u16 {
+    use andromeda_core::ipv4::proto;
+    use andromeda_core::tcp::TcpView;
+    use andromeda_core::udp::UdpView;
+    match ip.protocol() {
+        p if p == proto::TCP => TcpView::parse(ip.payload())
+            .map(|t| overlay::flow_hash(ip.src(), ip.dst(), p, t.src_port(), t.dst_port()))
+            .unwrap_or(0),
+        p if p == proto::UDP => UdpView::parse(ip.payload())
+            .map(|u| overlay::flow_hash(ip.src(), ip.dst(), p, u.src_port(), u.dst_port()))
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 impl Pipeline {
@@ -84,7 +104,6 @@ impl Pipeline {
             cfg,
             fabric,
             nat,
-            scratch: Vec::with_capacity(2048),
             ip_id: 0,
             stats: PipelineStats::default(),
         }
@@ -106,15 +125,20 @@ impl Pipeline {
     }
 
     /// Tenant → underlay: resolve, optionally SNAT, encapsulate.
+    ///
+    /// Hot path: one parse of the inner IPv4 header, one copy of the inner frame
+    /// into the output buffer, and the overlay header written in place — no scratch
+    /// buffer and (by default) no outer UDP checksum pass over the payload.
     pub fn on_tenant_frame(&mut self, inner: &[u8], out: &mut [u8], now: u64) -> Decision {
         let eth = match EthFrame::parse(inner) {
             Ok(e) => e,
             Err(_) => return self.drop("bad-inner-eth"),
         };
+        let ethertype = eth.ethertype();
 
         // Proxy-ARP: answer tenant "who has X?" with the virtual gateway MAC so the
         // tenant can send without knowing the far endpoint's real L2 address.
-        if eth.ethertype() == ethernet::ethertype::ARP {
+        if ethertype == ethernet::ethertype::ARP {
             match arp::ArpView::parse(eth.payload()) {
                 Ok(a) if a.is_request() && a.target_ip() != a.sender_ip() => {
                     match arp::write_reply(out, eth.payload(), self.cfg.virtual_gateway_mac) {
@@ -128,14 +152,17 @@ impl Pipeline {
                 _ => return self.drop("arp-ignored"),
             }
         }
-
-        if eth.ethertype() != ethernet::ethertype::IPV4 {
+        if ethertype != ethernet::ethertype::IPV4 {
             return self.drop("non-ipv4-inner");
         }
-        let inner_dst = match Ipv4View::parse(eth.payload()) {
-            Ok(ip) => ip.dst(),
+
+        // Single parse of the inner IPv4 header → destination + flow entropy.
+        let ip = match Ipv4View::parse(eth.payload()) {
+            Ok(ip) => ip,
             Err(_) => return self.drop("bad-inner-ip"),
         };
+        let inner_dst = ip.dst();
+        let mut flow = flow_hash_of(&ip);
 
         // Decide next hop: in-VPC endpoint, or default route to the gateway.
         let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(self.cfg.vni, inner_dst) {
@@ -146,32 +173,34 @@ impl Pipeline {
             },
         };
 
-        // Copy into scratch so we can mutate (RX frame is borrowed immutably).
-        self.scratch.clear();
-        self.scratch.extend_from_slice(inner);
+        // Place the inner frame directly in the output buffer (the single copy),
+        // then build the overlay header in front of it.
+        let ioff = overlay::OVERLAY_OVERHEAD;
+        let end = ioff + inner.len();
+        if out.len() < end {
+            return self.drop("encap-out-too-small");
+        }
+        out[ioff..end].copy_from_slice(inner);
 
-        // Overlay L2 adjacency: point the inner frame at the resolved endpoint MAC.
+        // Overlay L2 adjacency: rewrite the inner destination MAC in place.
         if let Some(m) = new_dst_mac {
-            if let Ok(mut e) = EthFrameMut::parse(&mut self.scratch) {
-                e.set_dst(m);
-            }
+            out[ioff..ioff + 6].copy_from_slice(&m.0);
         }
 
-        // SNAT on egress from the VPC.
+        // SNAT on egress from the VPC; recompute flow entropy from the new tuple.
         if do_snat {
-            if let Some(t) = five_tuple_of(&self.scratch[ethernet::ETH_HDR_LEN..]) {
+            let ip_off = ioff + ethernet::ETH_HDR_LEN;
+            if let Some(t) = five_tuple_of(&out[ip_off..end]) {
                 let rw = self.nat.process(t, Direction::Outbound, now);
                 if !rw.is_noop() {
-                    let _ = nat_apply(&mut self.scratch[ethernet::ETH_HDR_LEN..], &rw);
+                    let _ = nat_apply(&mut out[ip_off..end], &rw);
                     self.stats.natted += 1;
                 }
             }
+            if let Ok(ip2) = Ipv4View::parse(&out[ip_off..end]) {
+                flow = flow_hash_of(&ip2);
+            }
         }
-
-        // Per-flow entropy for underlay ECMP / node spreading.
-        let flow = five_tuple_of(&self.scratch[ethernet::ETH_HDR_LEN..])
-            .map(|t| overlay::flow_hash(t.src_ip, t.dst_ip, t.protocol, t.src_port, t.dst_port))
-            .unwrap_or(0);
 
         let params = EncapParams {
             outer_src_mac: self.cfg.outer_src_mac,
@@ -181,13 +210,9 @@ impl Pipeline {
             vni: self.cfg.vni,
             flow_hash: flow,
             ip_id: self.next_ip_id(),
+            outer_udp_checksum: self.cfg.outer_udp_checksum,
         };
-
-        // scratch is borrowed immutably here while out is written — disjoint, OK.
-        let inner_bytes = std::mem::take(&mut self.scratch);
-        let res = overlay::encap(out, &inner_bytes, &params);
-        self.scratch = inner_bytes; // give the buffer back for reuse
-        match res {
+        match overlay::encap_in_place(out, inner.len(), &params) {
             Ok(n) => {
                 self.stats.encapped += 1;
                 Decision::Forward(n)
@@ -308,6 +333,7 @@ mod tests {
             nat_ip: None,
             gateway_node_ip: None,
             virtual_gateway_mac: mac(0xff),
+            outer_udp_checksum: false,
         };
         let nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20100);
         Pipeline::new(cfg, fabric, nat)

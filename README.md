@@ -234,12 +234,26 @@ on what the datapath logic itself costs:
 
 | inner frame | encap (east-west) | encap + SNAT |
 |---|---|---|
-| 64 B  | **19 Mpps** · 52 ns/pkt | 11.7 Mpps · 86 ns/pkt |
-| 1400 B | 7.6 Mpps · **88 Gbit/s** | 6.1 Mpps · 71 Gbit/s |
+| 60 B  | **50.6 Mpps** · 19.8 ns/pkt | 15.0 Mpps · 67 ns/pkt |
+| 1396 B | 30.9 Mpps · 32 ns/pkt | 12.5 Mpps · 80 ns/pkt |
 
-The incremental-checksum SNAT path adds ~33 ns/packet — the cost of connection
-tracking plus a handful of one's-complement updates, not a payload rescan. (Numbers
-from a release build; run `andromeda bench` on your own hardware.)
+That's a **2.6× speedup** over the first cut (19 → 50 Mpps on small frames), from
+four changes that are all standard dataplane practice:
+
+- **Single copy, headers in place** (`encap_in_place`): the inner frame is written
+  into the output buffer once, then the 50-byte overlay header is stamped in front
+  of it — no scratch buffer, no second copy.
+- **Zero outer UDP checksum by default** (RFC 6935; what VXLAN does): the outer
+  checksum no longer forces a full pass over the payload. Inner IPv4/TCP/UDP
+  checksums are still exact.
+- **`FxHashMap`** for the fabric lookup instead of SipHash — the resolve is a
+  per-packet cost, and SipHash is built to resist collisions, not to be fast.
+- **`#[inline]` on the hot header/checksum builders + fat LTO** so the whole
+  encap path collapses into one function with no cross-crate call overhead.
+
+These are microbench numbers (single core, in cache); a live AF_XDP socket adds
+`poll`/wakeup/copy cost on top, and veth in SKB mode is slower than a real NIC in
+native mode. Run `andromeda bench` on your own hardware.
 
 ## Design notes
 

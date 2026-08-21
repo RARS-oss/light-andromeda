@@ -174,6 +174,7 @@ impl<'a> EthFrameMut<'a> {
 
 /// Write an Ethernet II header into the first 14 bytes of `buf`.
 /// Returns the number of bytes written (`ETH_HDR_LEN`).
+#[inline]
 pub fn write_header(buf: &mut [u8], dst: MacAddr, src: MacAddr, ethertype: u16) -> usize {
     buf[0..6].copy_from_slice(&dst.0);
     buf[6..12].copy_from_slice(&src.0);

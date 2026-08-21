@@ -12,7 +12,7 @@
 //! it via a control protocol (BGP-EVPN, a custom gRPC bus, etc.).
 
 use andromeda_core::ethernet::MacAddr;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::net::Ipv4Addr;
 
 pub mod config;
@@ -74,8 +74,8 @@ impl Fabric {
     pub fn new(local_node_ip: Ipv4Addr) -> Self {
         Self {
             local_node_ip,
-            vpcs: HashMap::new(),
-            endpoints: HashMap::new(),
+            vpcs: HashMap::default(),
+            endpoints: HashMap::default(),
         }
     }
 

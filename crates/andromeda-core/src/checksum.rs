@@ -12,6 +12,7 @@
 /// Returns the value in host byte order, ready to be written big-endian into a
 /// header field. The result is the bitwise-NOT of the folded one's-complement sum.
 #[must_use]
+#[inline]
 pub fn checksum(data: &[u8]) -> u16 {
     !fold(sum_be16(data))
 }
@@ -19,6 +20,7 @@ pub fn checksum(data: &[u8]) -> u16 {
 /// Sum a byte slice as a sequence of big-endian 16-bit words into a 32-bit accumulator.
 /// A trailing odd byte is treated as the high byte of a final word (low byte = 0).
 #[must_use]
+#[inline]
 pub fn sum_be16(data: &[u8]) -> u32 {
     let mut sum: u32 = 0;
     let (pairs, rem) = data.as_chunks::<2>();
@@ -33,6 +35,7 @@ pub fn sum_be16(data: &[u8]) -> u32 {
 
 /// Fold a 32-bit accumulator down to 16 bits by adding the carries back in.
 #[must_use]
+#[inline]
 pub fn fold(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);

@@ -136,6 +136,7 @@ pub fn compute_checksum(src: std::net::Ipv4Addr, dst: std::net::Ipv4Addr, l4: &[
 
 /// Write an 8-byte UDP header. Caller fills payload separately then may call
 /// [`compute_checksum`] over header+payload and store it.
+#[inline]
 pub fn write_header(buf: &mut [u8], src_port: u16, dst_port: u16, payload_len: u16) -> usize {
     buf[0..2].copy_from_slice(&src_port.to_be_bytes());
     buf[2..4].copy_from_slice(&dst_port.to_be_bytes());

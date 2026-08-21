@@ -225,6 +225,7 @@ pub fn pseudo_header_sum(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, l4_len: u16
 /// Build a minimal 20-byte IPv4 header into `buf` and set the checksum.
 /// `payload_len` is the number of L4 bytes that will follow the header.
 #[allow(clippy::too_many_arguments)]
+#[inline]
 pub fn write_header(
     buf: &mut [u8],
     src: Ipv4Addr,

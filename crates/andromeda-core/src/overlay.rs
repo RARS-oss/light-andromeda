@@ -87,6 +87,7 @@ impl AndromedaHdr {
     }
 
     /// Serialize into 8 bytes.
+    #[inline]
     pub fn encode(&self, out: &mut [u8]) {
         out[0] = (self.version << 4) | (self.flags & 0x0f);
         out[1] = self.inner_proto;
@@ -128,6 +129,7 @@ impl AndromedaHdr {
 /// A 16-bit flow hash over the inner 5-tuple, used to pick an outer path/node.
 /// FNV-1a folded to 16 bits — cheap, stable, and good enough for ECMP spread.
 #[must_use]
+#[inline]
 pub fn flow_hash(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, src_port: u16, dst_port: u16) -> u16 {
     const OFFSET: u32 = 0x811c_9dc5;
     const PRIME: u32 = 0x0100_0193;
@@ -163,6 +165,10 @@ pub struct EncapParams {
     pub flow_hash: u16,
     /// Outer IPv4 identification field (bump per packet if you like).
     pub ip_id: u16,
+    /// Compute the outer UDP checksum. Setting this `false` transmits checksum 0,
+    /// which is legal for UDP-over-IPv4 tunnels (RFC 6935) and is what VXLAN does by
+    /// default — it avoids a full pass over the encapsulated payload on the hot path.
+    pub outer_udp_checksum: bool,
 }
 
 /// Encapsulate `inner` (a complete Ethernet frame) into `out`, returning the
@@ -175,13 +181,33 @@ pub fn encap(out: &mut [u8], inner: &[u8], p: &EncapParams) -> Result<usize, Par
             got: out.len(),
         });
     }
+    out[OVERLAY_OVERHEAD..total].copy_from_slice(inner);
+    encap_in_place(out, inner.len(), p)
+}
+
+/// Write the 50-byte overlay header prefix over an inner frame **already present**
+/// at `out[OVERLAY_OVERHEAD .. OVERLAY_OVERHEAD + inner_len]`. This is the hot-path
+/// entry point: it performs no copy of the inner frame (the caller placed it there
+/// once), so encapsulation costs only the header writes plus an optional checksum.
+#[inline]
+pub fn encap_in_place(
+    out: &mut [u8],
+    inner_len: usize,
+    p: &EncapParams,
+) -> Result<usize, ParseError> {
+    let total = OVERLAY_OVERHEAD + inner_len;
+    if out.len() < total {
+        return Err(ParseError::BufferTooSmall {
+            need: total,
+            got: out.len(),
+        });
+    }
 
     let eth_end = ethernet::ETH_HDR_LEN;
     let ip_end = eth_end + ipv4::IPV4_MIN_HDR_LEN;
     let udp_end = ip_end + udp::UDP_HDR_LEN;
     let andro_end = udp_end + ANDROMEDA_HDR_LEN;
 
-    // Outer Ethernet.
     ethernet::write_header(
         &mut out[..eth_end],
         p.outer_dst_mac,
@@ -189,8 +215,7 @@ pub fn encap(out: &mut [u8], inner: &[u8], p: &EncapParams) -> Result<usize, Par
         ethernet::ethertype::IPV4,
     );
 
-    // L4 payload length = UDP header + Andromeda header + inner frame.
-    let udp_payload_len = (ANDROMEDA_HDR_LEN + inner.len()) as u16;
+    let udp_payload_len = (ANDROMEDA_HDR_LEN + inner_len) as u16;
     let ip_payload_len = udp::UDP_HDR_LEN as u16 + udp_payload_len;
 
     // Outer IPv4 (DF set: overlay endpoints must not fragment; PMTU is the tenant's problem).
@@ -208,7 +233,7 @@ pub fn encap(out: &mut [u8], inner: &[u8], p: &EncapParams) -> Result<usize, Par
     // Outer UDP (src port = flow hash → per-flow entropy for the underlay's own ECMP).
     udp::write_header(
         &mut out[ip_end..udp_end],
-        p.flow_hash | 0xc000, // keep it in the ephemeral range
+        p.flow_hash | 0xc000,
         ANDROMEDA_UDP_PORT,
         udp_payload_len,
     );
@@ -218,12 +243,11 @@ pub fn encap(out: &mut [u8], inner: &[u8], p: &EncapParams) -> Result<usize, Par
     hdr.inner_proto = inner_proto::ETHERNET;
     hdr.encode(&mut out[udp_end..andro_end]);
 
-    // Inner frame.
-    out[andro_end..total].copy_from_slice(inner);
-
-    // Outer UDP checksum over pseudo-header + (udp hdr + andromeda + inner).
-    let c = udp::compute_checksum(p.outer_src_ip, p.outer_dst_ip, &out[ip_end..total]);
-    out[ip_end + 6..ip_end + 8].copy_from_slice(&c.to_be_bytes());
+    if p.outer_udp_checksum {
+        let c = udp::compute_checksum(p.outer_src_ip, p.outer_dst_ip, &out[ip_end..total]);
+        out[ip_end + 6..ip_end + 8].copy_from_slice(&c.to_be_bytes());
+    }
+    // else: write_header already left the checksum field 0 (== "not computed").
 
     Ok(total)
 }
@@ -303,6 +327,7 @@ mod tests {
             vni: 0x00_0064,
             flow_hash: 0xbeef,
             ip_id: 0x4242,
+            outer_udp_checksum: true,
         };
         let n = encap(&mut out, &inner, &p).unwrap();
         assert_eq!(n, OVERLAY_OVERHEAD + inner.len());
