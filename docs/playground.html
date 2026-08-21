@@ -339,14 +339,17 @@
     return c;
   }
 
-  // FNV-1a over the inner 5-tuple, folded 32 -> 16 (matches andromeda-core::overlay::flow_hash)
+  // Multiply-xor ECMP mix over the inner 5-tuple, folded 32 -> 16
+  // (matches andromeda-core::overlay::flow_hash).
   function flowHash(src, dst, proto, sp, dp) {
-    let h = 0x811c9dc5 >>> 0;
-    const P = 0x01000193;
-    const mix = (b) => { h = (h ^ b) >>> 0; h = Math.imul(h, P) >>> 0; };
-    src.forEach(mix); dst.forEach(mix); mix(proto);
-    be16(sp).forEach(mix); be16(dp).forEach(mix);
-    return ((h >>> 16) ^ (h & 0xffff)) & 0xffff;
+    const u32 = (b) => (((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0);
+    const ports = (((sp << 16) | dp) >>> 0);
+    let h = (Math.imul(u32(src), 0x9e3779b1) ^ Math.imul(u32(dst), 0x85ebca77)
+      ^ Math.imul(ports, 0xc2b2ae3d) ^ Math.imul(proto, 0x27d4eb2f)) >>> 0;
+    h ^= h >>> 15;
+    h = Math.imul(h, 0x2c1b3c6d) >>> 0;
+    h ^= h >>> 13;
+    return (((h >>> 16) ^ h) & 0xffff);
   }
 
   const PROTO = { udp: 17, tcp: 6, icmp: 1 };
