@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside Light-Andromeda</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap">
+<style>
+  :root {
+    --bg: #eef2f2; --panel: #ffffff; --panel-2: #f6f9f9;
+    --ink: #16232a; --muted: #55696f; --faint: #8698a0;
+    --line: #dde5e6; --line-strong: #c6d2d3;
+    --accent: #0e9c8c; --accent-ink: #0a463f; --accent-soft: #d8efec;
+    --good: #2f8f5b; --warn: #b9812f;
+    --shadow: 0 1px 2px rgba(16,32,40,.05), 0 10px 34px rgba(16,32,40,.07);
+    --l-oeth:#5f7f9c; --l-oip:#b9812f; --l-oudp:#c15f6c; --l-andro:#0e9c8c; --l-ieth:#6f6fc0;
+    --maxw: 60ch;
+  }
+  :root:not([data-theme="light"]) { @media (prefers-color-scheme: dark) {
+    --bg:#0b1114; --panel:#111a1e; --panel-2:#0e1619; --ink:#dbe7e7; --muted:#93a6ac; --faint:#63767c;
+    --line:#1f2d31; --line-strong:#2b3c41; --accent:#2bc4b2; --accent-ink:#d3fff8; --accent-soft:#123531;
+    --good:#57c98a; --warn:#e0a95a; --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 44px rgba(0,0,0,.4);
+    --l-oeth:#7ea2c4; --l-oip:#e0a95a; --l-oudp:#e08592; --l-andro:#2bc4b2; --l-ieth:#9a95ea;
+  }}
+  :root[data-theme="dark"] {
+    --bg:#0b1114; --panel:#111a1e; --panel-2:#0e1619; --ink:#dbe7e7; --muted:#93a6ac; --faint:#63767c;
+    --line:#1f2d31; --line-strong:#2b3c41; --accent:#2bc4b2; --accent-ink:#d3fff8; --accent-soft:#123531;
+    --good:#57c98a; --warn:#e0a95a; --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 44px rgba(0,0,0,.4);
+    --l-oeth:#7ea2c4; --l-oip:#e0a95a; --l-oudp:#e08592; --l-andro:#2bc4b2; --l-ieth:#9a95ea;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 30px 24px 80px; }
+  p { max-width: var(--maxw); }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  /* hero */
+  .hero { padding: 26px 0 30px; border-bottom: 1px solid var(--line); margin-bottom: 34px; }
+  .eyebrow { font: 600 12px/1 "IBM Plex Mono", monospace; letter-spacing: .2em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px; }
+  h1 { font-family: "Fraunces", Georgia, serif; font-weight: 600; font-size: clamp(30px, 5vw, 46px); line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 14px; text-wrap: balance; }
+  .lede { font-size: 18px; color: var(--muted); max-width: 66ch; margin: 0; }
+  .hero-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+  .hstat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 13px 16px; box-shadow: var(--shadow); }
+  .hstat .n { font: 600 22px/1 "IBM Plex Mono", monospace; letter-spacing: -0.01em; }
+  .hstat .n .u { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .hstat .k { font: 500 11px/1.3 "IBM Plex Mono", monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-top: 5px; }
+  .hstat.hi { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+  .hstat.hi .n { color: var(--accent-ink); }
+
+  h2 { font-family: "Fraunces", Georgia, serif; font-weight: 600; font-size: 25px; letter-spacing: -0.01em; margin: 46px 0 6px; text-wrap: balance; }
+  h2 .num { font: 600 13px/1 "IBM Plex Mono", monospace; color: var(--accent); margin-right: 10px; vertical-align: 2px; }
+  h3 { font-size: 16px; font-weight: 600; margin: 26px 0 4px; }
+  .sub { color: var(--faint); font: 500 13px/1.4 "IBM Plex Mono", monospace; margin: 0 0 18px; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 20px 22px; margin: 20px 0; }
+
+  /* architecture diagram */
+  .arch { display: flex; flex-direction: column; gap: 0; align-items: stretch; }
+  .arch .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .node { border: 1px solid var(--line-strong); border-radius: 10px; padding: 11px 14px; background: var(--panel-2); font-size: 13.5px; flex: 1; min-width: 150px; }
+  .node b { display: block; font-size: 13px; margin-bottom: 2px; }
+  .node .d { color: var(--faint); font: 500 11.5px/1.4 "IBM Plex Mono", monospace; }
+  .node.dp { border-color: var(--accent); background: var(--accent-soft); }
+  .arrow { text-align: center; color: var(--faint); font: 600 12px/1 "IBM Plex Mono", monospace; padding: 7px 0; }
+
+  /* wire format strip */
+  .wire { display: flex; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); margin: 14px 0; font: 600 11.5px/1.3 "IBM Plex Mono", monospace; }
+  .wire div { padding: 12px 8px; text-align: center; color: #0b1a17; }
+  .wire .lbl { display: block; font-size: 10px; opacity: .8; font-weight: 500; margin-top: 3px; }
+  .w-oeth { background: var(--l-oeth); flex: 14; } .w-oip { background: var(--l-oip); flex: 20; }
+  .w-oudp { background: var(--l-oudp); flex: 8; } .w-andro { background: var(--l-andro); flex: 8; }
+  .w-inner { background: var(--l-ieth); flex: 40; color: #fff; }
+  :root[data-theme="dark"] .wire div, :root:not([data-theme="light"]) .wire div { color: #08120f; }
+
+  /* bar chart */
+  .chart { margin: 6px 0 8px; }
+  .barrow { display: grid; grid-template-columns: 220px 1fr; align-items: center; gap: 14px; padding: 5px 0; }
+  .barrow .step { font-size: 13px; color: var(--muted); text-align: right; }
+  .barrow .step b { color: var(--ink); font-weight: 600; }
+  .bartrack { position: relative; height: 26px; background: var(--panel-2); border-radius: 6px; }
+  .bar { position: absolute; left: 0; top: 0; height: 100%; border-radius: 6px; background: var(--accent);
+    display: flex; align-items: center; justify-content: flex-end; padding-right: 9px; color: #06231f;
+    font: 600 12.5px/1 "IBM Plex Mono", monospace; min-width: 44px; transition: filter .12s; }
+  :root[data-theme="dark"] .bar, :root:not([data-theme="light"]) .bar { color: #06231f; }
+  .bar.peak { background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 70%, #7ce0d3)); }
+  .bar.base { background: var(--l-oudp); color: #2a0d0d; }
+  .barrow:hover .bar { filter: brightness(1.06); }
+  .goal { position: absolute; top: -4px; bottom: -4px; width: 2px; background: repeating-linear-gradient(var(--faint) 0 4px, transparent 4px 8px); }
+  .goal-lab { font: 500 10px/1 "IBM Plex Mono", monospace; color: var(--faint); }
+  .axis { grid-column: 2; display: flex; justify-content: space-between; font: 500 10px/1 "IBM Plex Mono", monospace; color: var(--faint); margin-top: 4px; }
+
+  /* table */
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 460px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+  th { font: 600 11px/1 "IBM Plex Mono", monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+  td.n { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; text-align: right; }
+  td .mini { display: inline-block; height: 7px; border-radius: 4px; background: var(--accent); vertical-align: middle; margin-left: 8px; }
+  tr:hover td { background: var(--panel-2); }
+  .peakcell { color: var(--accent-ink); font-weight: 600; }
+
+  .callout { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 12px 12px 0; padding: 16px 20px; margin: 22px 0; }
+  .callout b { color: var(--accent-ink); }
+  .callout p { max-width: none; margin: 0; }
+
+  ul.clean { padding-left: 18px; max-width: var(--maxw); }
+  ul.clean li { margin: 6px 0; }
+  code { font-family: "IBM Plex Mono", monospace; font-size: .9em; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+
+  .theme-toggle { position: fixed; top: 16px; right: 16px; z-index: 10; font: 500 12px/1 "IBM Plex Mono", monospace;
+    color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; cursor: pointer; box-shadow: var(--shadow); }
+  .theme-toggle:hover { color: var(--ink); border-color: var(--line-strong); }
+
+  .foot { margin-top: 50px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--faint); font-size: 13px; }
+  .foot a { font-weight: 500; }
+
+  #tt { position: fixed; pointer-events: none; opacity: 0; transform: translate(-50%, -100%); background: var(--ink); color: var(--bg);
+    font: 500 12px/1.4 "IBM Plex Mono", monospace; padding: 7px 10px; border-radius: 7px; z-index: 20; white-space: nowrap; transition: opacity .1s; }
+  @media (max-width: 620px) { .barrow { grid-template-columns: 1fr; } .barrow .step { text-align: left; } .axis { grid-column: 1; } }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeBtn" type="button">◐ theme</button>
+<div id="tt"></div>
+
+<div class="wrap">
+  <header class="hero">
+    <p class="eyebrow">Technical report</p>
+    <h1>Building a kernel-bypass VPC overlay, one byte at a time</h1>
+    <p class="lede">Light-Andromeda is a from-scratch miniature of the software layer cloud providers run under every VM — the thing that gives a tenant a private network that isn't real. It parses packets by hand, wraps them in a custom overlay, forwards them by a centrally-programmed map, and moves them in user space past the kernel's network stack with AF_XDP. A real ping travels through it.</p>
+    <div class="hero-stats">
+      <div class="hstat hi"><div class="n">19&nbsp;→&nbsp;90 <span class="u">Mpps</span></div><div class="k">encap, 1 core</div></div>
+      <div class="hstat"><div class="n">4 / 4 <span class="u">0% loss</span></div><div class="k">ping through overlay</div></div>
+      <div class="hstat"><div class="n">~3,700 <span class="u">lines Rust</span></div><div class="k">+168 lines C shim</div></div>
+      <div class="hstat"><div class="n">41 <span class="u">tests</span></div><div class="k">clippy + fmt clean</div></div>
+    </div>
+  </header>
+
+  <h2><span class="num">01</span>The problem</h2>
+  <p>Tenant A's VM at <code>10.0.0.10</code> wants to reach its other VM at <code>10.0.0.20</code>. They sit on different physical hosts, on a fabric that knows nothing about <code>10.0.0.0/24</code> — and that is carrying other tenants who <em>also</em> use <code>10.0.0.0/24</code>. Host software has to intercept the raw frame, decide which physical machine hosts the destination right now, wrap the frame so the fabric can carry it without understanding tenant addresses (and without collisions), unwrap it on the far side, and do it fast enough to never be the bottleneck.</p>
+  <p>That is network virtualization. Getting the last two — correct isolation and speed — is the whole game, and it's what this project is about.</p>
+
+  <h2><span class="num">02</span>How it's built</h2>
+  <p>A Rust workspace with a clean split between the <b>data plane</b> (fast, per-packet) and the <b>control plane</b> (slow, "where does <code>10.0.0.20</code> live?") — the same separation a real SDN uses.</p>
+  <div class="card arch">
+    <div class="row"><div class="node"><b>Tenant VM</b><span class="d">10.0.0.10 · raw Eth frame</span></div></div>
+    <div class="arrow">│ AF_XDP RX — frames lifted to user space, past the kernel stack</div>
+    <div class="row">
+      <div class="node dp"><b>andromeda-dataplane</b><span class="d">parse → resolve → NAT → encap/decap</span></div>
+      <div class="node"><b>andromeda-control</b><span class="d">Fabric: (VNI, IP) → node + MAC · TOML</span></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div class="node"><b>andromeda-core</b><span class="d">wire formats · checksums · overlay · no unsafe</span></div>
+      <div class="node"><b>andromeda-nat</b><span class="d">SNAT/DNAT · conntrack · incremental cksum</span></div>
+    </div>
+    <div class="arrow">│ AF_XDP TX — encapsulated frame onto the underlay</div>
+    <div class="row"><div class="node"><b>Underlay fabric</b><span class="d">carries opaque UDP · knows no tenant IPs</span></div></div>
+  </div>
+
+  <h2><span class="num">03</span>The overlay on the wire</h2>
+  <p>An inner tenant frame is wrapped as L2-over-UDP — the same shape as VXLAN/GENEVE — with a custom 8-byte header carrying the tenant id and a flow hash:</p>
+  <div class="wire">
+    <div class="w-oeth">Outer Eth<span class="lbl">14 B</span></div>
+    <div class="w-oip">Outer IPv4<span class="lbl">20 B</span></div>
+    <div class="w-oudp">UDP<span class="lbl">8 B</span></div>
+    <div class="w-andro">Andromeda<span class="lbl">8 B</span></div>
+    <div class="w-inner">inner tenant frame<span class="lbl">the VM's packet</span></div>
+  </div>
+  <ul class="clean">
+    <li><b>VNI (24-bit)</b> — the tenant id, so overlapping <code>10.0.0.0/24</code> spaces stay isolated.</li>
+    <li><b>Flow hash (16-bit)</b> — a hash of the inner 5-tuple, also written into the outer UDP source port so the underlay's ECMP spreads flows without opening the tunnel.</li>
+    <li><b>Hop limit</b> — an overlay TTL against encapsulation loops.</li>
+  </ul>
+  <p class="sub">Dissect it live: the browser playground and <code>andromeda inspect</code> build byte-identical packets — verified two ways.</p>
+
+  <h2><span class="num">04</span>Making it fast</h2>
+  <p class="sub">single core · AMD Ryzen 5 5600 · release build · in-cache microbenchmark of the forwarding logic · 60-byte inner frame, east-west encap</p>
+  <p>The first working version did 19 Mpps. Six changes — each standard dataplane practice, none of them gaming the benchmark — took the encapsulation core to ~90 Mpps:</p>
+
+  <div class="card">
+    <div class="chart" id="chart"></div>
+  </div>
+  <p>Reading the chart: the big jumps are <b>removing work</b>, not clever tricks. Stop copying the frame twice. Stop scanning the payload for an outer UDP checksum the spec lets you omit (RFC 6935, exactly what VXLAN does). Replace a per-packet hash built to resist collisions (SipHash) with one built to be fast. Precompute the constant outer header once. And finally, when the frame is already in the AF_XDP buffer, stamp the header into its headroom and <b>never copy the payload at all</b>.</p>
+
+  <h3>The full matrix</h3>
+  <p class="sub">Mpps per path; the bar under each number scales to 108 Mpps</p>
+  <div class="tablewrap">
+    <table id="matrix">
+      <thead><tr><th>Forwarding path</th><th style="text-align:right">60 B frame</th><th style="text-align:right">1396 B frame</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <p><b>The finding that matters.</b> Batching 32 frames per call — the usual next optimization — <em>didn't help</em> (~85 Mpps vs ~90 for a single L1-hot frame). The single frame reuses one cache-hot buffer; the batch touches a 64&nbsp;KB working set that spills to L2, and that is the whole difference. So the datapath is <b>memory-bound, not compute-bound</b>: adding SIMD would speed up the part that's already cheap. That's why there's no fake "100 Mpps" here from a single-flow cache — the honest path past ~90 on one core is <em>less memory traffic</em>, not a cleverer loop. (Decapsulation, which builds no header, genuinely does clear 100 Mpps.)</p>
+  </div>
+
+  <h2><span class="num">05</span>What it actually does live</h2>
+  <p>Microbenchmarks measure the logic ceiling. A live AF_XDP socket adds the I/O the ceiling ignores. On the WSL2 veth setup (generic/SKB XDP, copy mode, single core), fed 64-byte UDP from a <code>sendmmsg</code> generator:</p>
+  <div class="hero-stats" style="margin-top:16px">
+    <div class="hstat"><div class="n">2.6 <span class="u">Mpps</span></div><div class="k">RX + encap · 0 drops</div></div>
+    <div class="hstat"><div class="n">~0.6 <span class="u">Mpps</span></div><div class="k">TX ceiling (veth SKB)</div></div>
+    <div class="hstat"><div class="n">~0.2 <span class="u">ms</span></div><div class="k">overlay RTT added</div></div>
+    <div class="hstat hi"><div class="n">100% <span class="u">forwarded</span></div><div class="k">of offered RX load</div></div>
+  </div>
+  <p>The switch pulled and encapsulated <b>100% of the offered load with zero receive drops</b>; the bottleneck was the veth's copy-mode TX path and the generator, never the dataplane. On a real NIC with native, zero-copy XDP that gap closes — showing it is future work, not a WSL2 experiment.</p>
+
+  <h2><span class="num">06</span>Honest limitations</h2>
+  <ul class="clean">
+    <li>The headline numbers are an <b>in-cache single-core microbenchmark</b> of the logic — clearly labelled, not a line-rate claim.</li>
+    <li><b>WSL2 + veth + generic XDP</b> is well below a real NIC in native/zero-copy mode; the live numbers reflect that environment, not the design's ceiling.</li>
+    <li>Scope is deliberately narrow: <b>single VPC, IPv4, provisioned endpoint table</b> (no MAC learning), no fragmentation or encryption. Depth on the core mechanism over breadth.</li>
+  </ul>
+  <p>It's a portfolio project — a deliberately small, complete, and honest implementation of a large idea.</p>
+
+  <div class="foot">
+    <p><b>Light-Andromeda</b> · Rust + AF_XDP · a user-space VPC overlay dataplane.<br>
+    The full write-up is <code>docs/REPORT.md</code>; the interactive packet playground is a companion artifact. Built to understand how cloud networks really work — at the level a host actually operates.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+  try { var s = localStorage.getItem("andromeda-theme"); if (s) root.setAttribute("data-theme", s); } catch (e) {}
+  document.getElementById("themeBtn").addEventListener("click", function () {
+    var cur = root.getAttribute("data-theme");
+    var dark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("andromeda-theme", next); } catch (e) {}
+  });
+
+  var tt = document.getElementById("tt");
+  function showTip(e, html) {
+    tt.innerHTML = html; tt.style.opacity = "1";
+    tt.style.left = e.clientX + "px"; tt.style.top = (e.clientY - 12) + "px";
+    tt.style.transform = "translate(-50%,-100%)";
+  }
+  function hideTip() { tt.style.opacity = "0"; }
+
+  // ---- journey chart ----
+  var AXIS_MAX = 108;
+  var steps = [
+    { label: "First working cut", note: "scratch buffer · double copy · SipHash", mpps: 19, cls: "base" },
+    { label: "Single-copy, no outer UDP cksum", note: "encap_in_place · FxHashMap", mpps: 45, cls: "" },
+    { label: "#[inline] + fat LTO", note: "whole-program inlining", mpps: 50, cls: "" },
+    { label: "Fast flow hash", note: "parallel multiply-xor vs FNV chain", mpps: 60, cls: "" },
+    { label: "Header templating", note: "precomputed prefix · 5-add checksum", mpps: 65, cls: "" },
+    { label: "Zero-copy in-place", note: "stamp into UMEM headroom · no copy", mpps: 90, cls: "peak" },
+  ];
+  var chart = document.getElementById("chart");
+  steps.forEach(function (s) {
+    var row = document.createElement("div"); row.className = "barrow";
+    var pct = (s.mpps / AXIS_MAX * 100).toFixed(1);
+    row.innerHTML =
+      '<div class="step"><b>' + s.label + '</b><br><span style="color:var(--faint);font-size:11.5px" class="mono">' + s.note + '</span></div>' +
+      '<div class="bartrack"><div class="goal" style="left:' + (100 / AXIS_MAX * 100).toFixed(1) + '%"></div>' +
+      '<div class="bar ' + s.cls + '" style="width:' + pct + '%">' + s.mpps + '</div></div>';
+    chart.appendChild(row);
+    var bar = row.querySelector(".bar");
+    bar.addEventListener("mousemove", function (e) { showTip(e, s.mpps + " Mpps &nbsp;·&nbsp; " + (1000 / s.mpps).toFixed(1) + " ns/pkt"); });
+    bar.addEventListener("mouseleave", hideTip);
+  });
+  var axis = document.createElement("div"); axis.className = "axis";
+  axis.innerHTML = "<span>0</span><span>the 100 Mpps line ↑ (dashed)</span><span>108 Mpps</span>";
+  chart.appendChild(axis);
+
+  // ---- result matrix ----
+  var rows = [
+    { path: "encap · copy (RX→TX)", a: 65, b: 33 },
+    { path: "encap · zero-copy (1 hot frame)", a: 90, b: 91 },
+    { path: "encap · zero-copy (batch, 64 KB)", a: 85, b: 85 },
+    { path: "decap", a: 108, b: 37, peak: true },
+    { path: "encap + SNAT (conntrack)", a: 17, b: 14 },
+  ];
+  var tb = document.querySelector("#matrix tbody");
+  function cell(mpps, peak) {
+    var w = Math.max(6, mpps / 108 * 90);
+    var ns = (1000 / mpps).toFixed(0);
+    return '<td class="n' + (peak ? ' peakcell' : '') + '">' + mpps + ' Mpps <span style="color:var(--faint)">· ' + ns + ' ns</span>' +
+      '<span class="mini" style="width:' + w.toFixed(0) + 'px' + (peak ? ';background:var(--accent)' : '') + '"></span></td>';
+  }
+  rows.forEach(function (r) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td>' + r.path + '</td>' + cell(r.a, r.peak) + cell(r.b, false);
+    tb.appendChild(tr);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,7 @@
 # Light-Andromeda
 
+![Rust](https://img.shields.io/badge/Rust-2021-000?logo=rust) ![tests](https://img.shields.io/badge/tests-41%20passing-2f8f5b) ![lint](https://img.shields.io/badge/clippy%20%2B%20fmt-clean-2f8f5b) ![license](https://img.shields.io/badge/license-MIT-0e9c8c) ![peak](https://img.shields.io/badge/encap-~90%20Mpps%2Fcore-0e9c8c)
+
 **A user-space, kernel-bypass network-virtualization dataplane — a miniature of the
 software-defined networking layer cloud providers run under every VM.**
 
@@ -9,12 +11,32 @@ Light-Andromeda takes tenant traffic, wraps it in a custom L2-over-UDP overlay
 SDN stack), forwards it between nodes according to a centrally-programmed fabric
 map, and performs stateful **SNAT/DNAT** on the fly — all in user space, with the
 packet path built to run on top of **AF_XDP** so frames bypass the host kernel's
-network stack entirely.
+network stack entirely. A real ICMP echo travels end-to-end across two independent
+user-space switches, over the overlay, and back.
 
 > Portfolio note: this project exists to demonstrate that I understand how modern
 > cloud hypervisors and SDN work at the host level — wire formats parsed byte by
 > byte, incremental checksum math, connection tracking, overlay encapsulation, and
 > zero-copy user-space packet processing.
+
+**📄 Read the [technical report](docs/report.html) · 🧪 try the [packet playground](docs/playground.html) · 📘 the full [write-up](docs/REPORT.md)**
+
+## Quickstart
+
+```bash
+# 1) Portable — no root, no Linux needed (macOS/Windows/Linux):
+cargo test --workspace                       # 41 tests
+cargo run -p andromeda-cli -- bench          # performance table (single core)
+cargo run -p andromeda-cli -- inspect        # decode a synthesized overlay packet
+
+# 2) Or in one command with Docker:
+docker build -t andromeda . && docker run --rm andromeda bench
+
+# 3) The real kernel-bypass demo — a ping THROUGH the overlay (Linux + libxdp, root):
+sudo apt-get install -y libxdp-dev libbpf-dev clang m4 pkg-config
+cargo build --release -p andromeda-cli --features afxdp
+sudo ./scripts/demo-2node.sh
+```
 
 ---
 
