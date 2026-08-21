@@ -1,12 +1,13 @@
 //! # andromeda-dataplane
 //!
-//! The per-packet forwarding core that will run inside the AF_XDP receive loop.
-//!
-//! The AF_XDP socket plumbing (UMEM, FILL/COMPLETION/RX/TX rings) lands in the
-//! next iteration. This module already hosts the *pipeline logic* that is
-//! independent of the socket layer, so it can be unit-tested against in-memory
-//! buffers and then dropped straight onto the ring loop.
+//! The per-packet forwarding core. [`pipeline`] holds the socket-agnostic
+//! forwarding logic (encap/decap/NAT) and is unit-tested over in-memory buffers.
+//! [`afxdp`] (feature `afxdp`, Linux + libxdp) binds a real AF_XDP socket and
+//! drives the pipeline from the RX ring — the actual kernel-bypass datapath.
 
 pub mod pipeline;
+
+#[cfg(feature = "afxdp")]
+pub mod afxdp;
 
 pub use pipeline::{Decision, Pipeline, PipelineConfig};

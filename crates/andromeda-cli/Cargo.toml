@@ -14,3 +14,8 @@ andromeda-core = { workspace = true }
 andromeda-nat = { workspace = true }
 andromeda-control = { workspace = true }
 andromeda-dataplane = { workspace = true }
+
+[features]
+default = []
+# Turns on the `run` subcommand (real AF_XDP datapath, Linux + libxdp only).
+afxdp = ["andromeda-dataplane/afxdp"]

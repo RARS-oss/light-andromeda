@@ -109,12 +109,43 @@ Each crate is small and single-purpose, and the two hardest, most reusable piece
 - [x] Control-plane fabric map and cross-node forwarding resolution
 - [x] End-to-end forwarding pipeline (tenant→encap→peer→decap) over in-memory buffers
 
+- [x] **AF_XDP socket layer**: UMEM + FILL/COMPLETION/RX/TX rings via a thin FFI
+      shim over the system `libxdp`; real kernel bypass, verified on Linux 6.6
+- [x] `andromeda run <iface>`: attach to an interface and forward live traffic
+      (`--mode dump|encap|decap`)
+- [x] veth/netns demo script proving bypass + capturing the overlay on the wire
+
 **In progress:**
 
-- [ ] AF_XDP socket layer: UMEM + FILL/COMPLETION/RX/TX rings, real kernel bypass
-- [ ] `andromeda run <iface>`: attach to a veth and forward live traffic
-- [ ] Multi-node veth/netns demo (`scripts/`) with real `ping`/`iperf` across the overlay
+- [ ] Two-interface switch: `run --tenant <if> --underlay <if>` for a full
+      tenant→encap→underlay→decap→tenant path (real ping *through* the overlay)
+- [ ] Declarative fabric config (endpoints/routes from a file)
 - [ ] Latency & throughput benchmarks vs. the kernel path
+
+## Seeing it work
+
+`sudo ./scripts/demo.sh bypass` runs the switch in dump mode and pings it from an
+isolated namespace. The pings get **zero replies** — because the AF_XDP program
+lifts them into user space before the kernel's IP stack ever sees them. That 100%
+"loss" *is* the proof of bypass:
+
+```
+rx=28 ...                     # frames received directly in user space
+--- 10.10.0.1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss
+```
+
+`sudo ./scripts/demo.sh encap` runs the switch in encap mode and captures the wire
+on the peer. Each tenant ping comes back wrapped in the Andromeda overlay
+(`tcpdump` mis-labels UDP/43481, but the bytes are ours):
+
+```
+IP 192.168.1.1.49152 > 192.168.1.2.43481:  (outer IPv4 + UDP to the Andromeda port)
+  0x0018:  ... a9d9 0072 812b 1000 0000 0000 6440   UDP dport=0xa9d9(43481)
+                                 ^^^^ Andromeda: ver=1  ^^^^^^ VNI=0x64=100, hop=64
+  0x0024:  0a71 0388 a35b 16b4 786a d3fc 0800 4500   inner Ethernet frame ...
+  0x0034:  0054 ...      4001 ... 0a0a 0002 0a0a 0001   inner IPv4 10.10.0.2 -> 10.10.0.1 (ICMP)
+```
 
 ---
 
@@ -130,6 +161,12 @@ cargo test --workspace
 
 # run the in-memory end-to-end demo:
 cargo run -p andromeda-cli -- selftest
+
+# build the real datapath (needs libxdp-dev / libbpf-dev on Linux):
+cargo build --release -p andromeda-cli --features afxdp
+
+# see it forward live traffic on a veth pair (needs root):
+sudo ./scripts/demo.sh encap
 ```
 
 ---

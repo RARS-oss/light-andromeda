@@ -4,9 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "AF_XDP kernel-bypass dataplane: RX/TX rings, per-packet parse -> overlay/NAT -> forward"
+build = "build.rs"
 
 [dependencies]
 andromeda-core = { workspace = true }
 andromeda-nat = { workspace = true }
 andromeda-control = { workspace = true }
-# NOTE: the AF_XDP socket binding (xsk-rs / libxdp) is wired in the next iteration.
+libc = { version = "0.2", optional = true }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
+[features]
+default = []
+# Enables the AF_XDP socket layer (Linux + libxdp/libbpf only).
+afxdp = ["dep:libc"]
