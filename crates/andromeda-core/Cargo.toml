@@ -1,0 +1,13 @@
+[package]
+name = "andromeda-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zero-copy L2/L3/L4 packet parsing and the Andromeda overlay encapsulation format"
+
+# Core is intentionally dependency-free (only std). Every byte of every header is
+# parsed and built by hand — this is the layer that demonstrates wire-format literacy.
+[dependencies]
+
+[features]
+default = []

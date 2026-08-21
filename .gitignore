@@ -1,0 +1,18 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Build artifacts (we point CARGO_TARGET_DIR elsewhere during dev, but ignore anyway)
+*.o
+*.rlib
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local scratch
+/scratch
+*.pcap

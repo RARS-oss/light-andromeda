@@ -1,0 +1,12 @@
+[package]
+name = "andromeda-dataplane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AF_XDP kernel-bypass dataplane: RX/TX rings, per-packet parse -> overlay/NAT -> forward"
+
+[dependencies]
+andromeda-core = { workspace = true }
+andromeda-nat = { workspace = true }
+andromeda-control = { workspace = true }
+# NOTE: the AF_XDP socket binding (xsk-rs / libxdp) is wired in the next iteration.

@@ -1,0 +1,16 @@
+[package]
+name = "andromeda-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "andromeda: run the switch, manage the fabric, and drive benchmarks"
+
+[[bin]]
+name = "andromeda"
+path = "src/main.rs"
+
+[dependencies]
+andromeda-core = { workspace = true }
+andromeda-nat = { workspace = true }
+andromeda-control = { workspace = true }
+andromeda-dataplane = { workspace = true }

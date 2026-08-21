@@ -1,0 +1,9 @@
+[package]
+name = "andromeda-nat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateful SNAT/PAT + DNAT with connection tracking, built on andromeda-core"
+
+[dependencies]
+andromeda-core = { workspace = true }
