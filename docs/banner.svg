@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 372" width="1200" height="372" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12221f"/>
+      <stop offset="1" stop-color="#0d1719"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2bc4b2"/>
+      <stop offset="1" stop-color="#63e0cf"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="370" rx="20" fill="url(#bg)" stroke="#24363b" stroke-width="1.5"/>
+
+  <!-- faint packet grid motif -->
+  <g opacity="0.06" stroke="#2bc4b2" stroke-width="1">
+    <line x1="0" y1="90" x2="1200" y2="90"/><line x1="0" y1="180" x2="1200" y2="180"/><line x1="0" y1="270" x2="1200" y2="270"/>
+  </g>
+
+  <text x="56" y="66" fill="#2bc4b2" font-size="15" font-weight="600" letter-spacing="4">RUST · AF_XDP · SDN OVERLAY DATAPLANE</text>
+  <text x="54" y="128" fill="#eaf3f2" font-size="58" font-weight="800" letter-spacing="-1">Light-Andromeda</text>
+  <text x="56" y="168" fill="#9fb4ba" font-size="20">A user-space, kernel-bypass VPC overlay —</text>
+  <text x="56" y="195" fill="#9fb4ba" font-size="20">the SDN layer cloud providers run under every VM.</text>
+
+  <!-- the overlay wire strip: the signature visual -->
+  <g font-size="13" font-weight="600" text-anchor="middle">
+    <rect x="56"  y="232" width="96"  height="46" rx="6" fill="#5f7f9c"/>
+    <text x="104" y="253" fill="#0b1a17">Outer Eth</text><text x="104" y="270" fill="#0b1a17" font-size="10" font-weight="500" opacity="0.8">14 B</text>
+    <rect x="156" y="232" width="132" height="46" rx="6" fill="#c69141"/>
+    <text x="222" y="253" fill="#1a1206">Outer IPv4</text><text x="222" y="270" fill="#1a1206" font-size="10" font-weight="500" opacity="0.8">20 B</text>
+    <rect x="292" y="232" width="72"  height="46" rx="6" fill="#c96f7c"/>
+    <text x="328" y="253" fill="#1a0c0e">UDP</text><text x="328" y="270" fill="#1a0c0e" font-size="10" font-weight="500" opacity="0.8">8 B</text>
+    <rect x="368" y="232" width="92"  height="46" rx="6" fill="url(#accent)"/>
+    <text x="414" y="253" fill="#052622">Andromeda</text><text x="414" y="270" fill="#052622" font-size="10" font-weight="500" opacity="0.85">VNI · 8 B</text>
+    <rect x="464" y="232" width="332" height="46" rx="6" fill="#7b7fd0"/>
+    <text x="630" y="253" fill="#f2f2ff">inner tenant frame</text><text x="630" y="270" fill="#f2f2ff" font-size="10" font-weight="500" opacity="0.85">the VM's packet</text>
+  </g>
+  <text x="56" y="308" fill="#64777d" font-size="13">50-byte overlay wraps the tenant's frame; the 24-bit VNI keeps overlapping tenant networks isolated.</text>
+  <text x="56" y="340" fill="#64777d" font-size="13">Built to understand how cloud networks really work — at the level a host actually operates.</text>
+
+  <!-- stat chips -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <rect x="836" y="228" width="150" height="58" rx="10" fill="#0e2723" stroke="#1f5148" stroke-width="1"/>
+    <text x="852" y="256" fill="#63e0cf" font-size="20" font-weight="700">~80 Mpps</text>
+    <text x="852" y="274" fill="#7f959b" font-size="11">encap · 1 core</text>
+    <rect x="998" y="228" width="146" height="58" rx="10" fill="#14201f" stroke="#26383c" stroke-width="1"/>
+    <text x="1014" y="256" fill="#dbe7e7" font-size="20" font-weight="700">4 / 4</text>
+    <text x="1014" y="274" fill="#7f959b" font-size="11">ping thru overlay</text>
+    <rect x="836" y="120" width="308" height="88" rx="12" fill="#0f1c1e" stroke="#26383c" stroke-width="1"/>
+    <text x="856" y="150" fill="#8ba0a7" font-size="12">controlled experiment shows the datapath is</text>
+    <text x="856" y="176" fill="#eaf3f2" font-size="17" font-weight="700">compute-bound in cache,</text>
+    <text x="856" y="197" fill="#eaf3f2" font-size="17" font-weight="700">memory-latency-bound past L3</text>
+  </g>
+</svg>

@@ -1,316 +1,176 @@
-# Light-Andromeda
+<p align="center">
+  <img src="docs/banner.svg" alt="Light-Andromeda — a user-space, kernel-bypass VPC overlay dataplane" width="100%">
+</p>
 
-![Rust](https://img.shields.io/badge/Rust-2021-000?logo=rust) ![tests](https://img.shields.io/badge/tests-41%20passing-2f8f5b) ![lint](https://img.shields.io/badge/clippy%20%2B%20fmt-clean-2f8f5b) ![license](https://img.shields.io/badge/license-MIT-0e9c8c) ![peak](https://img.shields.io/badge/encap-~90%20Mpps%2Fcore-0e9c8c)
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-2021-000?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/tests-41%20passing-2f8f5b" alt="tests">
+  <img src="https://img.shields.io/badge/clippy%20%2B%20fmt-clean-2f8f5b" alt="lint">
+  <img src="https://img.shields.io/badge/unsafe-0%20in%20core-2bc4b2" alt="no unsafe in core">
+  <img src="https://img.shields.io/badge/license-MIT-0e9c8c" alt="license">
+</p>
 
-**A user-space, kernel-bypass network-virtualization dataplane — a miniature of the
-software-defined networking layer cloud providers run under every VM.**
+<p align="center">
+  <b>What your VM thinks is a private network is really software on the host faking one.</b><br>
+  This is that software, in miniature — built from scratch to understand it byte by byte.
+</p>
 
-Light-Andromeda takes tenant traffic, wraps it in a custom L2-over-UDP overlay
-(its own 8-byte *Andromeda* header, in the spirit of VXLAN/GENEVE and Google's
-[Andromeda](https://research.google/pubs/andromeda-performance-isolation-and-velocity-at-scale-in-cloud-network-virtualization/)
-SDN stack), forwards it between nodes according to a centrally-programmed fabric
-map, and performs stateful **SNAT/DNAT** on the fly — all in user space, with the
-packet path built to run on top of **AF_XDP** so frames bypass the host kernel's
-network stack entirely. A real ICMP echo travels end-to-end across two independent
-user-space switches, over the overlay, and back.
+<p align="center">
+  📄 <a href="docs/report.html">Technical report</a> &nbsp;·&nbsp;
+  🧪 <a href="docs/playground.html">Packet playground</a> &nbsp;·&nbsp;
+  📘 <a href="docs/REPORT.md">Full write-up</a>
+</p>
 
-> Portfolio note: this project exists to demonstrate that I understand how modern
-> cloud hypervisors and SDN work at the host level — wire formats parsed byte by
-> byte, incremental checksum math, connection tracking, overlay encapsulation, and
-> zero-copy user-space packet processing.
+---
 
-**📄 Read the [technical report](docs/report.html) · 🧪 try the [packet playground](docs/playground.html) · 📘 the full [write-up](docs/REPORT.md)**
+Cloud providers don't give a virtual machine a real network. They give it the
+*illusion* of one — a private address space stitched across a shared physical fabric
+by software running on every host (Google's is **Andromeda**; the pattern is **SDN**
+with **VXLAN/GENEVE** encapsulation). **Light-Andromeda** is a working miniature of
+that software: it parses packets by hand, wraps them in a custom overlay, forwards
+them by a centrally-programmed map, translates addresses in flight, and moves them
+**in user space past the kernel's network stack** with `AF_XDP`. A real ping travels
+end-to-end through it.
 
-## Quickstart
+## See it in 30 seconds — no root, no Linux needed
 
 ```bash
-# 1) Portable — no root, no Linux needed (macOS/Windows/Linux):
-cargo test --workspace                       # 41 tests
-cargo run -p andromeda-cli -- bench          # performance table (single core)
-cargo run -p andromeda-cli -- inspect        # decode a synthesized overlay packet
-
-# 2) Or in one command with Docker:
-docker build -t andromeda . && docker run --rm andromeda bench
-
-# 3) The real kernel-bypass demo — a ping THROUGH the overlay (Linux + libxdp, root):
-sudo apt-get install -y libxdp-dev libbpf-dev clang m4 pkg-config
-cargo build --release -p andromeda-cli --features afxdp
-sudo ./scripts/demo-2node.sh
+cargo run -p andromeda-cli -- inspect     # decode a real overlay packet, layer by layer
 ```
-
----
-
-## Why this is interesting (the concepts on display)
-
-| Concept | Where it lives |
-|---|---|
-| **OS bypass / user-space packet processing** | AF_XDP RX/TX rings over a shared UMEM (dataplane crate) |
-| **Manual wire-format parsing** | `andromeda-core`: Ethernet / IPv4 / UDP / TCP parsed and built by hand, zero-copy over borrowed byte slices |
-| **Incremental checksums (RFC 1624)** | Address/port rewrites patch L3+L4 checksums by 16-bit delta instead of rescanning payloads |
-| **Overlay encapsulation (VPC)** | Custom Andromeda header carrying a 24-bit VNI + a flow hash for ECMP spreading |
-| **SDN control plane** | A fabric map: `(VNI, inner-IP) → underlay node + inner MAC`, distributed to every switch |
-| **Stateful NAT** | SNAT/PAT with a port allocator and conntrack; DNAT port-forwarding with reverse bindings |
-| **Systems Rust** | `#![forbid(unsafe_code)]` in the core, allocation-free hot path, workspace of focused crates |
-
----
-
-## Architecture
-
-```
-        VPC 100 (10.0.0.0/24)                             VPC 100 (10.0.0.0/24)
-   ┌───────────────────────────┐                     ┌───────────────────────────┐
-   │  tenant 10.0.0.10          │                     │  tenant 10.0.0.20          │
-   │        │ inner Eth frame   │                     │        ▲ inner Eth frame   │
-   │        ▼                   │                     │        │                   │
-   │  ┌───────────────┐         │   Andromeda overlay │   ┌───────────────┐        │
-   │  │  andromeda     │  encap  │   (L2-over-UDP)     │   │  andromeda    │ decap  │
-   │  │  switch (XDP)  │─────────┼─────────────────────┼──▶│  switch (XDP) │        │
-   │  └───────────────┘         │   UDP :43481        │   └───────────────┘        │
-   │   node 192.168.1.1         │   VNI=100           │    node 192.168.1.2        │
-   └───────────────────────────┘                     └───────────────────────────┘
-            underlay  ◀───────────  physical / veth fabric  ───────────▶  underlay
-
-   Encapsulated frame on the wire:
-   ┌────────────┬────────────┬──────────┬────────────────┬───────────────────────┐
-   │ outer Eth  │ outer IPv4 │ outer UDP│ Andromeda hdr  │  inner Ethernet frame  │
-   │  14 bytes  │  20 bytes  │  8 bytes │    8 bytes     │  (the tenant's packet) │
-   └────────────┴────────────┴──────────┴────────────────┴───────────────────────┘
-                                          └── 50 bytes of overlay overhead ──┘
-```
-
-### The Andromeda header (8 bytes)
-
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Ver | Flags |  Inner proto  |           Flow hash           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     VNI (24 bits)              |  Hop limit  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-* **Ver** — header version (currently 1).
-* **Flags** — `CONTROL` (control-plane message), `OAM` (reserved liveness channel).
-* **Inner proto** — `0` = inner Ethernet (L2 overlay), `1` = bare IPv4 (L3 overlay).
-* **Flow hash** — 16-bit FNV-1a over the inner 5-tuple; also copied into the outer
-  UDP source port so the *underlay's* own ECMP spreads a tenant's flows across paths.
-* **VNI** — 24-bit virtual network id (the tenant/VPC).
-* **Hop limit** — overlay TTL, guards against encapsulation loops.
-
----
-
-## Repository layout
-
-```
-light-andromeda/
-├── crates/
-│   ├── andromeda-core/       # zero-copy Eth/IPv4/UDP/TCP/ARP parsing + Andromeda encap + checksums
-│   ├── andromeda-nat/        # stateful SNAT/PAT + DNAT with conntrack
-│   ├── andromeda-control/    # VPC/endpoint model, TOML fabric config, forwarding lookup (SDN map)
-│   ├── andromeda-dataplane/  # forwarding pipeline + AF_XDP ring loop (csrc/xsk_shim.c)
-│   └── andromeda-cli/        # `andromeda`: selftest / bench / inspect / run / switch
-├── configs/                  # example fabric TOML configs
-├── scripts/                  # veth/netns demos (single-node + two-node)
-└── docs/                     # architecture + design notes
-```
-
-Each crate is small and single-purpose, and the two hardest, most reusable pieces
-(`core` and `nat`) are dependency-free and fully unit-tested.
-
----
-
-## Status
-
-**Done and tested (40 unit tests, all green; `cargo fmt` + `clippy -D warnings` clean, CI on GitHub Actions):**
-
-- [x] Byte-exact Ethernet / IPv4 / UDP / TCP parsing and building
-- [x] Internet checksum + incremental update (verified against full recompute)
-- [x] Andromeda overlay encap/decap round-trip with valid outer checksums
-- [x] Stateful SNAT/PAT with port allocation, conntrack, and reverse translation
-- [x] DNAT port-forwarding with server-reply un-NAT
-- [x] Control-plane fabric map and cross-node forwarding resolution
-- [x] End-to-end forwarding pipeline (tenant→encap→peer→decap) over in-memory buffers
-
-- [x] **AF_XDP socket layer**: UMEM + FILL/COMPLETION/RX/TX rings via a thin FFI
-      shim over the system `libxdp`; real kernel bypass, verified on Linux 6.6
-- [x] `andromeda run <iface>`: attach to an interface and forward live traffic
-      (`--mode dump|encap|decap`)
-- [x] veth/netns demo script proving bypass + capturing the overlay on the wire
-
-- [x] **Two-interface switch** (`andromeda switch --tenant <if> --underlay <if>`):
-      full tenant→encap→underlay→decap→tenant path — a **real ping travels through
-      the overlay** across two independent user-space switches
-- [x] Two-node veth/netns demo script
-
-- [x] **Declarative TOML fabric config** (`--config node.toml`): endpoints, VNI,
-      gateway, NAT, virtual gateway MAC
-- [x] **Proxy-ARP responder** on the tenant port — the demo needs no static
-      neighbours; the switch is the tenant's distributed gateway
-- [x] Live per-second throughput stats, an `inspect` packet decoder, and a
-      forwarding-core benchmark
-
-**Possible next steps:**
-
-- [ ] Multi-VPC on one switch (VNI keyed by ingress port); IPv6 / ND
-- [ ] MAC learning instead of a fully-provisioned endpoint table
-- [ ] Shared-UMEM zero-copy between the two ports; native (driver) XDP throughput
-
-## Poke at it (no root, no Linux needed)
-
-**Visual playground:** open [`docs/playground.html`](docs/playground.html) in a
-browser (or host it on GitHub Pages) — an interactive tool that builds a tenant
-packet and shows it wrapped in the Andromeda overlay: color-linked layer stack and
-hex dump, live checksums, and the flow hash → outer UDP source port. Its byte-level
-logic is verified to match `andromeda inspect` exactly.
-
-Or from the terminal:
-
-```
-$ andromeda inspect          # decodes a synthesized overlay packet, layer by layer
+```text
 Ethernet  02:00:00:00:a1:01 -> 02:00:00:00:a1:02  ethertype 0x0800 (IPv4)
   IPv4  192.168.1.1 -> 192.168.1.2  proto 17 (UDP)  ttl 64  len 90  cksum ok
-    UDP  65402 -> 43481  len 70
-      Andromeda  v1  VNI 100  flow 0x3f7a  hop 64
+    UDP  57553 -> 43481  len 70
+      Andromeda  v1  VNI 100  flow 0x60d1  hop 64
       -- inner frame --
         Ethernet  02:00:00:00:00:0a -> 02:00:00:00:00:0b  ethertype 0x0800 (IPv4)
-          IPv4  10.0.0.10 -> 10.0.0.20  proto 17 (UDP)  ttl 64  len 40  cksum ok
-            UDP  40000 -> 4242  len 20
+          IPv4  10.0.0.10 -> 10.0.0.20  proto 17 (UDP)  ttl 64  cksum ok
+```
+```bash
+cargo test --workspace                    # 41 tests
+cargo run -p andromeda-cli -- bench        # performance table (mean ± sd)
 ```
 
-`andromeda inspect <hex>` decodes any packet you paste (spaces/colons ignored) —
-feed it a `tcpdump -x` line and watch it unwrap the overlay. `andromeda bench`
-prints the forwarding-core throughput, and `andromeda selftest` runs the pipeline
-end to end. None of these need root or an AF_XDP-capable kernel.
+## What it is
 
-## Seeing it work
+<p align="center"><img src="docs/architecture.svg" alt="Two tenants communicating through two user-space AF_XDP switches over the Andromeda overlay" width="100%"></p>
 
-`sudo ./scripts/demo.sh bypass` runs the switch in dump mode and pings it from an
-isolated namespace. The pings get **zero replies** — because the AF_XDP program
-lifts them into user space before the kernel's IP stack ever sees them. That 100%
-"loss" *is* the proof of bypass:
+A **data plane** (fast, per-packet) and a **control plane** (slow — "where does
+`10.0.0.20` live?") — the same split a real SDN uses. The inner tenant frame is
+wrapped as L2-over-UDP with an 8-byte header carrying a **24-bit VNI** (so overlapping
+tenant `10.0.0.0/24`s stay isolated) and a **flow hash** (so the underlay's ECMP can
+spread flows without opening the tunnel).
 
-```
-rx=28 ...                     # frames received directly in user space
---- 10.10.0.1 ping statistics ---
-3 packets transmitted, 0 received, 100% packet loss
-```
+## A real ping travels through the overlay
 
-`sudo ./scripts/demo.sh encap` runs the switch in encap mode and captures the wire
-on the peer. Each tenant ping comes back wrapped in the Andromeda overlay
-(`tcpdump` mis-labels UDP/43481, but the bytes are ours):
+`sudo ./scripts/demo-2node.sh` builds two tenants in separate namespaces and two
+independent user-space switches, then pings **through** the overlay — encapsulate on
+one node, decapsulate on the other, no static ARP, no kernel forwarding in between:
 
-```
-IP 192.168.1.1.49152 > 192.168.1.2.43481:  (outer IPv4 + UDP to the Andromeda port)
-  0x0018:  ... a9d9 0072 812b 1000 0000 0000 6440   UDP dport=0xa9d9(43481)
-                                 ^^^^ Andromeda: ver=1  ^^^^^^ VNI=0x64=100, hop=64
-  0x0024:  0a71 0388 a35b 16b4 786a d3fc 0800 4500   inner Ethernet frame ...
-  0x0034:  0054 ...      4001 ... 0a0a 0002 0a0a 0001   inner IPv4 10.10.0.2 -> 10.10.0.1 (ICMP)
-```
-
-`sudo ./scripts/demo-2node.sh` builds two nodes (each from a generated TOML config)
-and pings **through** the overlay — tenant 10.0.0.10 reaches tenant 10.0.0.20 across
-two separate user-space switches, each encapsulating one direction and
-decapsulating the other. There are **no static ARP entries**: each switch proxy-ARPs
-its tenant as the distributed gateway.
-
-```
-PING 10.0.0.20 (10.0.0.20) 56(84) bytes of data.
-64 bytes from 10.0.0.20: icmp_seq=1 ttl=64 time=0.381 ms
+```text
+64 bytes from 10.0.0.20: icmp_seq=1 ttl=64 time=0.38 ms
 --- 10.0.0.20 ping statistics ---
 4 packets transmitted, 4 received, 0% packet loss
 
-# the switch prints a live line each second:
-[+  3s] rx  25 ( 10 pps)  tx  5 ( 4 pps)  encap 2 decap 2 arp 1 drop 20
+# each switch prints a live line:  [+3s] rx 26 tx 5  encap 2 decap 2 arp 1
 ```
 
----
+The switch pulling packets into user space **before the kernel stack sees them** is
+the "OS bypass." (In dump mode the ping gets *zero* replies — because the frames never
+reach the host's IP stack. That 100% "loss" is the proof.)
 
-## Build & test
+## Is it fast? And is it compute- or memory-bound?
 
-Requires a recent stable Rust toolchain. The dataplane's AF_XDP layer additionally
-needs `libxdp`/`libbpf` and a Linux kernel with `CONFIG_XDP_SOCKETS=y` (verified on
-kernel 6.6).
+The encapsulation core went from **19 to ~80 Mpps on one core** through six changes
+(header templating, zero-copy in-place encap, a zero outer UDP checksum à la VXLAN, an
+`FxHashMap` resolve, a parallel flow hash, fat LTO). But the interesting result is a
+**controlled experiment** — throughput vs. working-set size under sequential vs.
+random access:
 
-```bash
-# everything except the AF_XDP socket layer is pure, portable Rust:
-cargo test --workspace
-
-# run the in-memory end-to-end demo:
-cargo run -p andromeda-cli -- selftest
-
-# build the real datapath (needs libxdp-dev / libbpf-dev on Linux):
-cargo build --release -p andromeda-cli --features afxdp
-
-# see it forward live traffic on a veth pair (needs root):
-sudo ./scripts/demo.sh encap
-```
-
----
-
-## Performance
-
-`andromeda bench` micro-benchmarks the forwarding core (parse → resolve → optional
-SNAT → encapsulate) on one core — reported as **mean ± sd over 7 trials** (one
-warm-up discarded), AMD Ryzen 5 5600, release build:
-
-| inner frame | encap copy (RX→TX) | encap zero-copy | decap | encap + SNAT |
-|---|---|---|---|---|
-| 60 B  | 15.7 ns · **64 Mpps** | 13–14 ns · ~75 Mpps | 10.6 ns · **95 Mpps** | 57 ns · 17 Mpps |
-| 1396 B | 29 ns · 34 Mpps | 12.1 ns · **83 Mpps** | 20 ns · 51 Mpps | 75 ns · 13 Mpps |
-
-Starting from a first cut at **19 Mpps** (52 ns), the encap path is now ~4× faster —
-via header templating, zero-copy in-place encap (header into UMEM headroom, no
-payload copy), a zero outer UDP checksum (RFC 6935, as VXLAN), `FxHashMap` resolve, a
-parallel multiply-xor flow hash, `#[inline]` + fat LTO.
-
-**Is it compute- or memory-bound?** `andromeda bench --sweep` answers it with a
-controlled experiment — throughput vs. working-set size (4 KB → 64 MB) under
-sequential vs. shuffled access:
-
-```
-                 sequential   shuffled
-   ≤ 256 KB (L2)   ~80 Mpps    ~78 Mpps
-   512 KB (L2 edge)  80          59
-   4 MB (L3)         82          54
-   16 MB             80          13
-   64 MB (DRAM)      79         8.7
-```
+<p align="center"><img src="docs/sweep.svg" alt="Sequential access is flat at ~80 Mpps across all working sets; shuffled access collapses 9x past the L3 cache" width="88%"></p>
 
 Sequential access is **flat at ~80 Mpps across five orders of magnitude** — the
-prefetcher hides all latency, so the code is **compute-bound**. Shuffled access
-tracks the cache hierarchy exactly and collapses **9×** past L3 — **memory-latency-
-bound**. So the regime depends on locality, not the code; reporting only the
-cache-hot number would overstate real throughput by up to 9×. Full analysis, a
-roofline model, and threats to validity are in **[`docs/REPORT.md`](docs/REPORT.md)**
-and the [visual report](docs/report.html).
+prefetcher hides all latency, so the code is **compute-bound**. Random access tracks
+the cache hierarchy exactly and collapses **9×** past L3 — **memory-latency-bound**.
+The regime depends on locality, not the code; reporting only the cache-hot number
+would overstate throughput by up to 9×. *This experiment refuted the author's own
+first guess* — the full roofline model and threats to validity are in the
+[technical report](docs/REPORT.md). Run it yourself: `andromeda bench --sweep`.
 
-These are microbench numbers — the ceiling of the logic, not a live socket. On WSL2
-veth the switch sustained 100% of ~2.6 Mpps offered with zero RX drops; the veth's
-copy-mode TX (~0.6 Mpps), not the dataplane, was the bottleneck.
+## What's inside (the concepts on display)
 
-## Design notes
+| Concept | Where it lives |
+|---|---|
+| **OS bypass / user-space packet processing** | AF_XDP RX/TX rings over a shared UMEM; a ~170-line C shim over system `libxdp` |
+| **Manual wire-format parsing** | Ethernet / IPv4 / UDP / TCP / ARP parsed and built by hand, zero-copy over borrowed slices |
+| **Incremental checksums (RFC 1624)** | Address/port rewrites patch L3+L4 checksums by 16-bit delta — proven bit-identical to a full recompute |
+| **Overlay encapsulation (VPC)** | Custom 8-byte header: 24-bit VNI + flow hash; header templating on the hot path |
+| **SDN control plane** | Fabric map `(VNI, inner-IP) → node + MAC`, from declarative TOML |
+| **Stateful NAT** | SNAT/PAT with conntrack + a port allocator; DNAT port-forwarding |
+| **Distributed gateway** | Proxy-ARP with one virtual gateway MAC — tenants never learn each other's MACs |
+| **Systems Rust** | `#![forbid(unsafe_code)]` in the core; allocation-free hot path; `unsafe` confined to the FFI |
 
-**Zero-copy hot path.** Parsers are *views* over a borrowed `&[u8]`/`&mut [u8]` —
-the packet lives once, in the AF_XDP UMEM frame, and we only ever read or patch
-bytes in place. No per-packet allocation on the forwarding path.
+## How it's built
 
-**Incremental checksums.** When NAT rewrites an address or port, we do *not*
-recompute the TCP/UDP checksum over the payload. We adjust the stored checksum by
-the one's-complement delta of just the changed 16-bit words (RFC 1624). The test
-suite proves the incremental result is bit-identical to a from-scratch recompute.
+```
+crates/
+├── andromeda-core/       # wire formats, checksums, the Andromeda overlay — no deps, no unsafe
+├── andromeda-nat/        # stateful SNAT/DNAT + connection tracking
+├── andromeda-control/    # VPC/endpoint fabric map + TOML config
+├── andromeda-dataplane/  # the per-packet pipeline + the AF_XDP ring loop (csrc/xsk_shim.c)
+└── andromeda-cli/        # `andromeda`: selftest / bench / inspect / run / switch
+```
 
-**Policy/mechanism split.** The NAT engine decides *what* to change
-(`process(tuple, direction) → Rewrite`) as pure logic; a separate `apply()` mutates
-bytes and fixes checksums. This makes the tricky stateful logic testable without
-synthesizing packets, and keeps the byte-twiddling in one auditable place.
+## Try the interactive playground
 
-**Why AF_XDP and not raw sockets.** AF_XDP delivers frames straight from the driver
-(or the generic XDP hook) into a user-space ring, skipping the kernel's networking
-stack and its per-packet `sk_buff` allocation. That is the actual "OS bypass" that
-cloud dataplanes rely on to hit line rate — and the thing this project is here to
-demonstrate.
+**[`docs/playground.html`](docs/playground.html)** — build a tenant packet in your
+browser and watch it get wrapped in the overlay: a color-linked layer stack and hex
+dump (hover a layer to light up its bytes), live checksums, and the flow hash. Its
+JavaScript byte-assembly is **verified to produce packets that `andromeda inspect`
+decodes byte-for-byte identically** — two independent implementations agreeing on the
+wire format. *(Open it locally, or enable GitHub Pages to host it.)*
 
-## License
+## Build & run everything
 
-MIT.
+```bash
+# portable (any OS, no root):
+cargo test --workspace
+cargo run -p andromeda-cli -- bench           # mean ± sd performance table
+cargo run -p andromeda-cli -- bench --sweep   # the cache-hierarchy experiment
+
+# one command with Docker:
+docker build -t andromeda . && docker run --rm andromeda bench
+
+# the real kernel-bypass datapath (Linux + libxdp, root):
+sudo apt-get install -y libxdp-dev libbpf-dev clang m4 pkg-config
+cargo build --release -p andromeda-cli --features afxdp
+sudo ./scripts/demo-2node.sh                  # ping through the overlay
+sudo ./scripts/demo.sh bypass                 # watch RX bypass the kernel
+```
+
+Requires a recent stable Rust toolchain; the AF_XDP path needs a Linux kernel with
+`CONFIG_XDP_SOCKETS=y` (verified on 6.6).
+
+## Status & roadmap
+
+**Done:** byte-exact L2/L3/L4 + ARP parsing · Andromeda overlay · incremental
+checksums · SNAT/DNAT + conntrack · SDN fabric + TOML config · proxy-ARP gateway ·
+AF_XDP datapath · two-node overlay ping · header templating + zero-copy encap ·
+rigorous benchmarks + the cache experiment · 41 tests, CI, clippy/fmt clean.
+
+**Next:** native-mode zero-copy AF_XDP on a real NIC (with PMU data) · multi-VPC per
+switch · IPv6/ND · MAC learning · shared-UMEM zero-copy across both ports.
+
+## Docs
+
+- **[Technical report (visual)](docs/report.html)** — the story with charts
+- **[Technical report (Markdown)](docs/REPORT.md)** — abstract, related work, methodology, evaluation, roofline, threats to validity, references
+- **[Packet playground](docs/playground.html)** — interactive overlay builder
+- **[Architecture notes](docs/ARCHITECTURE.md)** — the packet walk
+
+## Contributing & license
+
+Contributions and questions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). MIT
+licensed. If you find this interesting, a ⭐ helps others find it.
+
+<sub>Built to understand how cloud networks really work — at the level a host actually operates.</sub>

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 384" width="820" height="384" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <rect x="1" y="1" width="818" height="382" rx="16" fill="#0f1b1e" stroke="#24363b" stroke-width="1.5"/>
+
+  <text x="30" y="34" fill="#eaf3f2" font-size="19" font-weight="700">Compute-bound in cache, memory-bound out of it</text>
+  <text x="30" y="52" fill="#8ba0a7" font-size="12.5">encap throughput vs. resident working set — the same code, two access orders (AMD Ryzen 5 5600, 1 core)</text>
+
+  <!-- y gridlines + labels -->
+  <g font-family="ui-monospace, Menlo, monospace" font-size="11" fill="#64777d">
+    <line x1="60" y1="334" x2="670" y2="334" stroke="#22343a"/><text x="52" y="338" text-anchor="end">0</text>
+    <line x1="60" y1="272.2" x2="670" y2="272.2" stroke="#1a2a2f"/><text x="52" y="276" text-anchor="end">20</text>
+    <line x1="60" y1="210.4" x2="670" y2="210.4" stroke="#1a2a2f"/><text x="52" y="214" text-anchor="end">40</text>
+    <line x1="60" y1="148.7" x2="670" y2="148.7" stroke="#1a2a2f"/><text x="52" y="152" text-anchor="end">60</text>
+    <line x1="60" y1="86.9" x2="670" y2="86.9" stroke="#1a2a2f"/><text x="52" y="90" text-anchor="end">80</text>
+  </g>
+  <text x="30" y="70" fill="#64777d" font-size="11" font-family="ui-monospace, Menlo, monospace">Mpps</text>
+
+  <!-- cache boundary markers -->
+  <g font-size="10.5" fill="#7f959b" font-family="ui-monospace, Menlo, monospace">
+    <line x1="190.7" y1="56" x2="190.7" y2="334" stroke="#33474d" stroke-dasharray="3 4"/><text x="194" y="70">L1 32KB</text>
+    <line x1="365.0" y1="56" x2="365.0" y2="334" stroke="#33474d" stroke-dasharray="3 4"/><text x="368" y="70">L2 512KB</text>
+    <line x1="626.4" y1="56" x2="626.4" y2="334" stroke="#33474d" stroke-dasharray="3 4"/><text x="630" y="70">L3 32MB</text>
+  </g>
+
+  <!-- x labels -->
+  <g font-size="11" fill="#64777d" text-anchor="middle" font-family="ui-monospace, Menlo, monospace">
+    <text x="60" y="352">4KB</text><text x="234.3" y="352">64KB</text><text x="408.6" y="352">1MB</text><text x="582.9" y="352">16MB</text><text x="670" y="352">64MB</text>
+  </g>
+  <text x="365" y="372" fill="#64777d" font-size="11" text-anchor="middle">resident working set (log scale)</text>
+
+  <!-- sequential (teal) -->
+  <polyline fill="none" stroke="#2bc4b2" stroke-width="2.5" stroke-linejoin="round"
+    points="60,102.3 103.6,86.9 147.1,86.9 172.6,108.5 190.7,105.4 216.2,83.8 234.3,93.1 259.8,90.0 277.9,80.7 321.4,80.7 346.9,93.1 365.0,86.9 390.5,86.9 408.6,83.8 452.1,77.6 495.7,80.7 539.3,80.7 582.9,86.9 626.4,90.0 670.0,90.0"/>
+  <!-- shuffled (amber) -->
+  <polyline fill="none" stroke="#e0a95a" stroke-width="2.5" stroke-linejoin="round"
+    points="60,90.0 103.6,93.1 147.1,80.7 172.6,105.4 190.7,96.2 216.2,93.1 234.3,96.2 259.8,93.1 277.9,83.8 321.4,99.2 346.9,139.4 365.0,151.8 390.5,161.0 408.6,167.2 452.1,173.4 495.7,167.2 539.3,219.7 582.9,293.8 626.4,304.7 670.0,307.1"/>
+
+  <!-- end labels -->
+  <g font-family="system-ui, sans-serif">
+    <circle cx="670" cy="90.0" r="3.5" fill="#2bc4b2"/>
+    <text x="682" y="86" fill="#2bc4b2" font-size="13" font-weight="700">sequential</text>
+    <text x="682" y="102" fill="#7f959b" font-size="11">~80 Mpps · flat</text>
+    <circle cx="670" cy="307.1" r="3.5" fill="#e0a95a"/>
+    <text x="682" y="303" fill="#e0a95a" font-size="13" font-weight="700">shuffled</text>
+    <text x="682" y="319" fill="#7f959b" font-size="11">~9 Mpps · 9× drop</text>
+  </g>
+</svg>
