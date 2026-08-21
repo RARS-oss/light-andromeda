@@ -9,5 +9,8 @@ description = "Zero-copy L2/L3/L4 packet parsing and the Andromeda overlay encap
 # parsed and built by hand — this is the layer that demonstrates wire-format literacy.
 [dependencies]
 
+[dev-dependencies]
+proptest = "1"
+
 [features]
 default = []
