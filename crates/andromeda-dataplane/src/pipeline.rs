@@ -10,13 +10,15 @@
 //!   underlay. Decapsulate it, optionally reverse-NAT the inner packet, and hand
 //!   back the inner frame to deliver to the tenant port.
 //!
-//! Everything operates on caller-provided buffers; the only owned allocation is a
-//! reused scratch buffer, so the steady state is allocation-free.
+//! Everything operates on caller-provided buffers — no per-packet allocation. The
+//! outer header is precomputed once into a template and only its variable fields
+//! are patched per packet; [`Pipeline::on_tenant_frame_inplace`] is the zero-copy
+//! variant that stamps the header into an AF_XDP frame's headroom with no payload copy.
 
 use andromeda_control::Fabric;
 use andromeda_core::ethernet::{self, EthFrame, MacAddr};
 use andromeda_core::ipv4::Ipv4View;
-use andromeda_core::overlay::{self, EncapParams};
+use andromeda_core::overlay;
 use andromeda_core::{arp, five_tuple_of};
 use andromeda_nat::{apply as nat_apply, Direction, NatEngine};
 use std::net::Ipv4Addr;
@@ -71,39 +73,83 @@ pub struct PipelineStats {
     pub passed: u64,
 }
 
+/// Precomputed constant outer header (Ethernet + IPv4 + UDP) for the fast encap
+/// path — everything that does not change per packet, baked once from the config so
+/// forwarding only patches the variable fields.
+#[derive(Clone)]
+struct OuterTemplate {
+    /// Outer Ethernet(14) + IPv4(20) + UDP(8), constants filled, variable fields 0.
+    prefix: [u8; 42],
+    /// One's-complement sum of the constant IPv4 header words (all but total length,
+    /// identification, and the destination address).
+    ip_csum_base: u32,
+}
+
+impl OuterTemplate {
+    fn new(cfg: &PipelineConfig) -> Self {
+        let mut p = [0u8; 42];
+        ethernet::write_header(
+            &mut p[..14],
+            cfg.outer_dst_mac,
+            cfg.outer_src_mac,
+            ethernet::ethertype::IPV4,
+        );
+        p[14] = 0x45; // version 4, IHL 5
+        p[20..22].copy_from_slice(&0x4000u16.to_be_bytes()); // flags: DF
+        p[22] = 64; // ttl
+        p[23] = andromeda_core::ipv4::proto::UDP;
+        p[26..30].copy_from_slice(&cfg.local_node_ip.octets()); // source address
+        p[36..38].copy_from_slice(&overlay::ANDROMEDA_UDP_PORT.to_be_bytes()); // udp dst port
+        let ip_csum_base = 0x4500
+            + 0x4000
+            + 0x4011 // ttl(64)<<8 | proto(17)
+            + u16::from_be_bytes([p[26], p[27]]) as u32
+            + u16::from_be_bytes([p[28], p[29]]) as u32;
+        Self {
+            prefix: p,
+            ip_csum_base,
+        }
+    }
+}
+
 /// The forwarding engine: fabric map + NAT + config.
 pub struct Pipeline {
     cfg: PipelineConfig,
     pub fabric: Fabric,
     pub nat: NatEngine,
+    tmpl: OuterTemplate,
     ip_id: u16,
     stats: PipelineStats,
 }
 
 /// Compute the 16-bit ECMP flow hash from a parsed inner IPv4 header (0 if the L4
-/// protocol has no ports, e.g. ICMP).
+/// protocol has no ports, e.g. ICMP). Reads the L4 ports directly — for TCP and UDP
+/// alike they are the first two 16-bit words of the L4 header — instead of building
+/// a full segment view.
+#[inline]
 fn flow_hash_of(ip: &Ipv4View) -> u16 {
     use andromeda_core::ipv4::proto;
-    use andromeda_core::tcp::TcpView;
-    use andromeda_core::udp::UdpView;
-    match ip.protocol() {
-        p if p == proto::TCP => TcpView::parse(ip.payload())
-            .map(|t| overlay::flow_hash(ip.src(), ip.dst(), p, t.src_port(), t.dst_port()))
-            .unwrap_or(0),
-        p if p == proto::UDP => UdpView::parse(ip.payload())
-            .map(|u| overlay::flow_hash(ip.src(), ip.dst(), p, u.src_port(), u.dst_port()))
-            .unwrap_or(0),
-        _ => 0,
+    let p = ip.protocol();
+    if p == proto::TCP || p == proto::UDP {
+        let l4 = ip.payload();
+        if l4.len() >= 4 {
+            let sp = u16::from_be_bytes([l4[0], l4[1]]);
+            let dp = u16::from_be_bytes([l4[2], l4[3]]);
+            return overlay::flow_hash(ip.src(), ip.dst(), p, sp, dp);
+        }
     }
+    0
 }
 
 impl Pipeline {
     #[must_use]
     pub fn new(cfg: PipelineConfig, fabric: Fabric, nat: NatEngine) -> Self {
+        let tmpl = OuterTemplate::new(&cfg);
         Self {
             cfg,
             fabric,
             nat,
+            tmpl,
             ip_id: 0,
             stats: PipelineStats::default(),
         }
@@ -202,22 +248,126 @@ impl Pipeline {
             }
         }
 
-        let params = EncapParams {
-            outer_src_mac: self.cfg.outer_src_mac,
-            outer_dst_mac: self.cfg.outer_dst_mac,
-            outer_src_ip: self.cfg.local_node_ip,
-            outer_dst_ip: dst_node,
-            vni: self.cfg.vni,
-            flow_hash: flow,
-            ip_id: self.next_ip_id(),
-            outer_udp_checksum: self.cfg.outer_udp_checksum,
-        };
-        match overlay::encap_in_place(out, inner.len(), &params) {
-            Ok(n) => {
-                self.stats.encapped += 1;
-                Decision::Forward(n)
+        // Stamp the precomputed outer header (patch only the variable fields).
+        let ip_id = self.next_ip_id();
+        self.stamp_outer(out, inner.len(), dst_node, flow, ip_id);
+        self.stats.encapped += 1;
+        Decision::Forward(end)
+    }
+
+    /// Zero-copy encap: the inner frame is **already** at
+    /// `frame[OVERLAY_OVERHEAD .. OVERLAY_OVERHEAD + inner_len]` (e.g. an AF_XDP UMEM
+    /// frame with 50 bytes of headroom reserved), so encapsulation writes only the
+    /// overlay header in front of it — no copy of the payload at all. This is the
+    /// shared-UMEM datapath; [`on_tenant_frame`] is the two-buffer (RX→TX) variant.
+    pub fn on_tenant_frame_inplace(
+        &mut self,
+        frame: &mut [u8],
+        inner_len: usize,
+        now: u64,
+    ) -> Decision {
+        let ioff = overlay::OVERLAY_OVERHEAD;
+        let end = ioff + inner_len;
+        if frame.len() < end {
+            return self.drop("frame-too-small");
+        }
+
+        // Parse the inner header in place.
+        let (inner_dst, flow0) = {
+            let eth = match EthFrame::parse(&frame[ioff..end]) {
+                Ok(e) => e,
+                Err(_) => return self.drop("bad-inner-eth"),
+            };
+            if eth.ethertype() != ethernet::ethertype::IPV4 {
+                return self.drop("non-ipv4-inner");
             }
-            Err(_) => self.drop("encap-out-too-small"),
+            match Ipv4View::parse(eth.payload()) {
+                Ok(ip) => (ip.dst(), flow_hash_of(&ip)),
+                Err(_) => return self.drop("bad-inner-ip"),
+            }
+        };
+        let mut flow = flow0;
+
+        let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(self.cfg.vni, inner_dst) {
+            Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
+            None => match self.cfg.gateway_node_ip {
+                Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
+                None => return self.drop("no-route"),
+            },
+        };
+
+        if let Some(m) = new_dst_mac {
+            frame[ioff..ioff + 6].copy_from_slice(&m.0);
+        }
+        if do_snat {
+            let ip_off = ioff + ethernet::ETH_HDR_LEN;
+            if let Some(t) = five_tuple_of(&frame[ip_off..end]) {
+                let rw = self.nat.process(t, Direction::Outbound, now);
+                if !rw.is_noop() {
+                    let _ = nat_apply(&mut frame[ip_off..end], &rw);
+                    self.stats.natted += 1;
+                }
+            }
+            if let Ok(ip2) = Ipv4View::parse(&frame[ip_off..end]) {
+                flow = flow_hash_of(&ip2);
+            }
+        }
+
+        let ip_id = self.next_ip_id();
+        self.stamp_outer(frame, inner_len, dst_node, flow, ip_id);
+        self.stats.encapped += 1;
+        Decision::Forward(end)
+    }
+
+    /// Fast encap: copy the precomputed 42-byte Ethernet+IPv4+UDP header prefix,
+    /// patch the per-packet fields (destination, lengths, id, flow), and fold a
+    /// five-term IPv4 checksum from the template's constant base. The Andromeda
+    /// header follows at `[42..50]`; the inner frame is already at `[50..]`.
+    #[inline]
+    fn stamp_outer(
+        &self,
+        out: &mut [u8],
+        inner_len: usize,
+        dst_ip: Ipv4Addr,
+        flow: u16,
+        ip_id: u16,
+    ) {
+        use andromeda_core::ipv4::IPV4_MIN_HDR_LEN;
+
+        out[..42].copy_from_slice(&self.tmpl.prefix);
+
+        let total_len = (IPV4_MIN_HDR_LEN + 8 + overlay::ANDROMEDA_HDR_LEN + inner_len) as u16;
+        out[16..18].copy_from_slice(&total_len.to_be_bytes());
+        out[18..20].copy_from_slice(&ip_id.to_be_bytes());
+        let d = dst_ip.octets();
+        out[30..34].copy_from_slice(&d);
+
+        // IPv4 header checksum = ~(constant base + total_length + id + dst hi + dst lo).
+        let sum = self.tmpl.ip_csum_base
+            + total_len as u32
+            + ip_id as u32
+            + u16::from_be_bytes([d[0], d[1]]) as u32
+            + u16::from_be_bytes([d[2], d[3]]) as u32;
+        let csum = !andromeda_core::checksum::fold(sum);
+        out[24..26].copy_from_slice(&csum.to_be_bytes());
+
+        // Outer UDP: source port carries flow entropy; length covers udp+andromeda+inner.
+        out[34..36].copy_from_slice(&(flow | 0xc000).to_be_bytes());
+        let udp_len = (8 + overlay::ANDROMEDA_HDR_LEN + inner_len) as u16;
+        out[38..40].copy_from_slice(&udp_len.to_be_bytes());
+
+        // Andromeda header.
+        overlay::AndromedaHdr::new(self.cfg.vni, flow).encode(&mut out[42..50]);
+
+        // Strict mode (rare): fill the outer UDP checksum over the whole payload.
+        if self.cfg.outer_udp_checksum {
+            let end = overlay::OVERLAY_OVERHEAD + inner_len;
+            let c = andromeda_core::udp::compute_checksum(
+                self.cfg.local_node_ip,
+                dst_ip,
+                &out[34..end],
+            );
+            out[40..42].copy_from_slice(&c.to_be_bytes());
         }
     }
 
@@ -367,6 +517,40 @@ mod tests {
         assert!(ip.checksum_valid());
         assert_eq!(node1.stats().encapped, 1);
         assert_eq!(node2.stats().decapped, 1);
+    }
+
+    #[test]
+    fn outer_ipv4_checksum_valid_via_template() {
+        // The templated fast path builds the outer IPv4 checksum incrementally;
+        // make sure it actually verifies (nothing else in the suite checks it).
+        let mut node1 = two_node_pipeline();
+        let frame = tenant_udp_frame("10.0.0.10", "10.0.0.20", 1111, 2222, b"x");
+        let mut wire = vec![0u8; 2048];
+        let n = match node1.on_tenant_frame(&frame, &mut wire, 1) {
+            Decision::Forward(n) => n,
+            other => panic!("expected Forward, got {other:?}"),
+        };
+        let outer_ip = Ipv4View::parse(&wire[ethernet::ETH_HDR_LEN..n]).unwrap();
+        assert!(
+            outer_ip.checksum_valid(),
+            "templated outer IPv4 checksum must verify"
+        );
+        assert_eq!(outer_ip.protocol(), andromeda_core::ipv4::proto::UDP);
+
+        // The zero-copy path must produce a byte-identical packet.
+        let mut zc = vec![0u8; 2048];
+        let ioff = overlay::OVERLAY_OVERHEAD;
+        zc[ioff..ioff + frame.len()].copy_from_slice(&frame);
+        let mut node1b = two_node_pipeline();
+        let m = match node1b.on_tenant_frame_inplace(&mut zc, frame.len(), 1) {
+            Decision::Forward(m) => m,
+            other => panic!("expected Forward, got {other:?}"),
+        };
+        assert_eq!(
+            &wire[..n],
+            &zc[..m],
+            "copy and zero-copy paths must agree byte for byte"
+        );
     }
 
     #[test]

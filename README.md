@@ -228,32 +228,35 @@ sudo ./scripts/demo.sh encap
 
 ## Performance
 
-`andromeda bench` micro-benchmarks the forwarding core (parse → optional SNAT →
-encapsulate) on a single core, in cache, with no socket overhead — an upper bound
-on what the datapath logic itself costs:
+`andromeda bench` micro-benchmarks the forwarding core (parse → resolve → optional
+SNAT → encapsulate) on a single core, in cache, with no socket overhead — an upper
+bound on what the datapath logic itself costs:
 
-| inner frame | encap (east-west) | encap + SNAT |
-|---|---|---|
-| 60 B  | **50.6 Mpps** · 19.8 ns/pkt | 15.0 Mpps · 67 ns/pkt |
-| 1396 B | 30.9 Mpps · 32 ns/pkt | 12.5 Mpps · 80 ns/pkt |
+| inner frame | encap (copy, RX→TX) | encap zero-copy (in-place) | encap + SNAT |
+|---|---|---|---|
+| 60 B  | 64.6 Mpps · 15.5 ns | **89 Mpps** · 11.2 ns | 17.8 Mpps · 56 ns |
+| 1396 B | 33.2 Mpps · 30 ns | **88 Mpps** · 11.3 ns | 13.9 Mpps · 72 ns |
 
-That's a **2.6× speedup** over the first cut (19 → 50 Mpps on small frames), from
-four changes that are all standard dataplane practice:
+Starting from a first cut at **19 Mpps** (52 ns), the encap path is now **3.4×**
+faster copying and **~4.7×** faster zero-copy — every change is standard dataplane
+practice:
 
-- **Single copy, headers in place** (`encap_in_place`): the inner frame is written
-  into the output buffer once, then the 50-byte overlay header is stamped in front
-  of it — no scratch buffer, no second copy.
-- **Zero outer UDP checksum by default** (RFC 6935; what VXLAN does): the outer
-  checksum no longer forces a full pass over the payload. Inner IPv4/TCP/UDP
-  checksums are still exact.
-- **`FxHashMap`** for the fabric lookup instead of SipHash — the resolve is a
-  per-packet cost, and SipHash is built to resist collisions, not to be fast.
-- **`#[inline]` on the hot header/checksum builders + fat LTO** so the whole
-  encap path collapses into one function with no cross-crate call overhead.
+- **Header templating** — the constant outer Ethernet+IPv4+UDP header is built once
+  into a 42-byte template; forwarding copies it and patches only the variable fields,
+  folding the IPv4 checksum from a precomputed base (5 adds, not a 20-byte scan).
+- **Zero-copy in-place encap** (`on_tenant_frame_inplace`) — when the inner frame is
+  already in the UMEM frame with reserved headroom, the header is stamped in front of
+  it with **no payload copy at all**, so cost is independent of frame size (the
+  `copy` column carries an RX→TX memcpy that this one avoids).
+- **Zero outer UDP checksum by default** (RFC 6935; what VXLAN does) — no per-packet
+  pass over the payload. Inner IPv4/TCP/UDP checksums stay exact.
+- **`FxHashMap`** for the fabric resolve (not SipHash), a **multiply-xor flow hash**
+  with independent (parallel) mixes instead of a 13-deep FNV chain, `#[inline]` on the
+  hot builders, and `lto = "fat"`.
 
-These are microbench numbers (single core, in cache); a live AF_XDP socket adds
-`poll`/wakeup/copy cost on top, and veth in SKB mode is slower than a real NIC in
-native mode. Run `andromeda bench` on your own hardware.
+These are microbench numbers (single core, in cache) — the ceiling of the logic, not
+a live socket. A real AF_XDP datapath adds `poll`/wakeup cost, and veth in SKB mode
+is well below a real NIC in native mode. Run `andromeda bench` on your own hardware.
 
 ## Design notes
 

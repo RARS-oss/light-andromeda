@@ -341,8 +341,23 @@ fn bench_cmd(args: &[String]) {
             )
         });
 
+        // Zero-copy: the inner frame is already in the buffer at the overlay offset
+        // (as it would be in an AF_XDP UMEM frame with reserved headroom); encap only
+        // stamps the header — no payload copy.
+        let ioff = andromeda_core::overlay::OVERLAY_OVERHEAD;
+        let mut zc = vec![0u8; 2048];
+        zc[ioff..ioff + inner_len].copy_from_slice(&frame);
+        let mut ewz = build_pipeline(true, false);
+        let zc_ns = time_loop(iters, || {
+            matches!(
+                ewz.on_tenant_frame_inplace(&mut zc, inner_len, 0),
+                Decision::Forward(_)
+            )
+        });
+
         println!("\ninner frame = {inner_len} bytes  ({iters} iterations)");
-        report("encap (east-west)", ew_ns, iters, inner_len);
+        report("encap (east-west, copy)", ew_ns, iters, inner_len);
+        report("encap zero-copy (in-place)", zc_ns, iters, inner_len);
         report("encap + SNAT (egress)", nat_ns, iters, inner_len);
     }
 }

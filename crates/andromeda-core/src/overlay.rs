@@ -127,32 +127,25 @@ impl AndromedaHdr {
 }
 
 /// A 16-bit flow hash over the inner 5-tuple, used to pick an outer path/node.
-/// FNV-1a folded to 16 bits — cheap, stable, and good enough for ECMP spread.
+///
+/// ECMP entropy only needs to spread flows well and be stable — not resist
+/// adversarial collisions — so this is a multiply-xor mix (à la the xxHash/Murmur
+/// finalizer), not FNV. The four field mixes are *independent* multiplies, which
+/// the CPU issues in parallel; the old byte-at-a-time FNV was a 13-deep dependent
+/// chain that dominated the per-packet cost.
 #[must_use]
 #[inline]
 pub fn flow_hash(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, src_port: u16, dst_port: u16) -> u16 {
-    const OFFSET: u32 = 0x811c_9dc5;
-    const PRIME: u32 = 0x0100_0193;
-    let mut h = OFFSET;
-    let mut mix = |b: u8| {
-        h ^= b as u32;
-        h = h.wrapping_mul(PRIME);
-    };
-    for b in src.octets() {
-        mix(b);
-    }
-    for b in dst.octets() {
-        mix(b);
-    }
-    mix(protocol);
-    for b in src_port.to_be_bytes() {
-        mix(b);
-    }
-    for b in dst_port.to_be_bytes() {
-        mix(b);
-    }
-    // Fold 32 -> 16.
-    ((h >> 16) ^ (h & 0xffff)) as u16
+    let ports = ((src_port as u32) << 16) | dst_port as u32;
+    let mut h = u32::from_be_bytes(src.octets()).wrapping_mul(0x9E37_79B1)
+        ^ u32::from_be_bytes(dst.octets()).wrapping_mul(0x85EB_CA77)
+        ^ ports.wrapping_mul(0xC2B2_AE3D)
+        ^ (protocol as u32).wrapping_mul(0x27D4_EB2F);
+    // Short avalanche so nearby tuples land far apart.
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 13;
+    ((h >> 16) ^ h) as u16
 }
 
 /// Parameters for one encapsulation.
