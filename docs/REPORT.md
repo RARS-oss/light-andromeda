@@ -1,291 +1,342 @@
 # Light-Andromeda: a user-space, kernel-bypass VPC overlay dataplane
 
-*A technical report on the design, implementation, verification, and performance
-engineering of a miniature software-defined networking dataplane.*
+*A design-and-measurement study of a miniature software-defined-networking dataplane:
+custom overlay encapsulation, stateful NAT, and an AF_XDP fast path — implemented
+from scratch, verified, and characterized with controlled experiments.*
 
 ---
 
 ## Abstract
 
-Cloud providers do not give a virtual machine a real network. They give it the
-*illusion* of one — a private address space that is really an overlay stitched
-across a shared physical fabric by software running on every host. Google calls
-their version **Andromeda**; the industry calls the pattern **SDN** (software-
-defined networking) with **L2-over-UDP encapsulation** (VXLAN, GENEVE).
+Cloud providers do not give a virtual machine a real network; they give it the
+*illusion* of one — a private address space realized as an overlay stitched across a
+shared physical fabric by software on every host (Google's is **Andromeda** [1]; the
+industry pattern is **SDN** with **L2-over-UDP** encapsulation [2, 3]). This work
+reimplements that dataplane in miniature to study it at the level a host actually
+operates: frames parsed byte by byte, wrapped in a custom overlay header, forwarded
+by a centrally-programmed map, address-translated in flight, and moved **in user
+space past the kernel's network stack** via `AF_XDP` [4].
 
-**Light-Andromeda** is a from-scratch, working miniature of that dataplane, built
-to understand it at the level a host actually operates: packets parsed byte by
-byte, wrapped in a custom overlay header, forwarded by a centrally-programmed
-fabric map, address-translated on the fly, and moved **in user space past the
-kernel's networking stack** using `AF_XDP`. A real ICMP echo travels end-to-end
-across two independent user-space switches, over the overlay, and back — with no
-static ARP and no kernel forwarding in the middle.
-
-This report documents the architecture, the wire format, the correctness strategy,
-and — at length — the performance work that took the encapsulation core from
-**19 Mpps to ~90 Mpps on a single core**, including the experiment that showed the
-datapath is *memory-bound, not compute-bound*, and an honest account of where the
-numbers stop being the dataplane's fault.
-
----
-
-## 1. Background
-
-**The problem.** Tenant A's VM at `10.0.0.10` wants to talk to tenant A's other VM
-at `10.0.0.20`. Those two VMs may sit on different physical hosts, on a fabric that
-knows nothing about `10.0.0.0/24` and may be carrying a hundred other tenants who
-*also* use `10.0.0.0/24`. The host software must:
-
-1. Intercept the VM's raw Ethernet frame before it hits the wire.
-2. Decide which physical host currently hosts `10.0.0.20`.
-3. Wrap the frame so it can cross the physical fabric without the fabric needing to
-   understand tenant addresses — and so the tenant's `10.0.0.0/24` doesn't collide
-   with anyone else's.
-4. Unwrap it on the far host and deliver it to the right VM.
-5. Do all of this fast enough to not be the bottleneck (millions of packets/sec).
-
-That is network virtualization, and (4)+(5) are why it is hard.
-
-**Why user space / kernel bypass.** The Linux network stack allocates an `sk_buff`
-per packet and walks a long, general-purpose path. For a dataplane that does one
-specific thing per packet, that overhead dominates. `AF_XDP` lets a program attach
-at the driver's earliest hook (XDP) and **redirect raw frames into a user-space
-ring buffer over a shared memory region (UMEM)** — no `sk_buff`, no stack traversal.
-That is the "OS bypass" this project demonstrates.
+We make three contributions. **(1)** A complete, correct, and dependency-light
+implementation (Rust; `#![forbid(unsafe_code)]` outside the FFI layer) whose wire
+format is verified two independent ways and through which a real ICMP echo traverses
+two switches end-to-end. **(2)** A performance study that takes the encapsulation
+core from **19 to ~80 Mpps on a single core** through six changes, each reported with
+a stated methodology and error bars. **(3)** A controlled cache experiment — throughput
+vs. working-set size under *sequential* and *shuffled* access — that answers whether
+the datapath is compute- or memory-bound. The answer is *both, depending on locality*:
+compute-bound at ~80 Mpps while the hot set is cache-resident and access is
+prefetch-friendly, and memory-latency-bound (down to ~9 Mpps) under random access to
+a working set beyond the L2/L3 caches. That result **corrects an earlier informal
+"memory-bound" claim** and is, we think, the most interesting thing the project has
+to say.
 
 ---
 
-## 2. Architecture
+## 1. Introduction
 
-A Rust workspace of small, single-purpose crates:
+**The problem.** Tenant A's VM at `10.0.0.10` must reach its other VM at `10.0.0.20`.
+They may sit on different physical hosts, on a fabric that knows nothing about
+`10.0.0.0/24` and that also carries other tenants who *reuse* `10.0.0.0/24`. Host
+software must intercept the raw frame, decide which physical host currently holds the
+destination, wrap the frame so the fabric can carry it without understanding tenant
+addresses (and without cross-tenant collisions), unwrap it on the far host, and do so
+fast enough to never be the bottleneck. Correct isolation and speed are the whole
+problem; this report is about both.
+
+**Why kernel bypass.** The Linux stack allocates an `sk_buff` per packet and walks a
+long, general-purpose path. For a dataplane that does one specific thing per packet,
+that overhead dominates. `AF_XDP` attaches at the driver's earliest hook and
+redirects raw frames into a user-space ring over a shared memory region (UMEM), with
+no `sk_buff` and no stack traversal [4]. That is the "OS bypass" studied here.
+
+**Contributions and scope.** This is a portfolio/learning artifact, not a production
+system, and its scope is deliberately narrow (§8). Its value is a *clean, verified,
+and honestly-measured* mini-implementation of a large idea, including a controlled
+experiment that revises the author's own initial conclusion.
+
+---
+
+## 2. Background and related work
+
+**Overlay formats.** VXLAN [2] and GENEVE [3] encapsulate a tenant L2 frame in
+UDP/IP, tagging it with a 24-bit virtual network id (VNI) so overlapping tenant
+address spaces stay isolated. Light-Andromeda's 8-byte header is the same idea with
+one addition: a 16-bit flow hash carried both in the header and in the outer UDP
+source port, so the underlay's own ECMP can spread a tenant's flows without parsing
+the tunnel.
+
+**Production SDN dataplanes.** Google's **Andromeda** [1] is the direct inspiration:
+a host dataplane with a centrally-programmed map and a hierarchy of fast/slow paths
+(the "Hoverboard" model), heavily offloaded. Google's **Snap** [5] moves networking
+into a userspace microkernel. Both are large distributed systems; this project models
+only the innermost per-packet transform.
+
+**Kernel bypass and userspace dataplanes.** XDP [6] runs eBPF at the driver hook;
+`AF_XDP` [4] extends it to deliver raw frames to userspace. **DPDK** and FD.io's
+**VPP** [7] are the reference userspace dataplanes; VPP's *vector packet processing*
+(amortizing per-packet overhead across a batch) directly motivated the batch path in
+§5. Production l2/l3-forwarding on DPDK reaches tens to >100 Mpps per core, but with
+poll-mode drivers, huge pages, and NIC offloads this project does not use.
+
+**In-kernel overlays.** **Cilium** takes the opposite tack — VXLAN/GENEVE handled by
+eBPF *inside* the kernel. Light-Andromeda deliberately explores the userspace side to
+study AF_XDP directly.
+
+**Positioning.** Relative to all of the above this is a single-core, single-VPC,
+IPv4, software-only reimplementation. It contributes no new mechanism; it contributes
+a *measured, reproducible characterization* of a clean implementation, and it is
+honest about the regime in which its numbers hold.
+
+---
+
+## 3. Design
+
+The system splits, as real SDN does, into a **data plane** (fast, per-packet) and a
+**control plane** (slow — "where does `10.0.0.20` live?").
 
 ```
                           ┌──────────── control plane ────────────┐
-                          │  andromeda-control                     │
                           │  Fabric: (VNI, inner-IP) → node + MAC   │
-                          │  loaded from a declarative TOML config  │
+                          │  loaded from declarative TOML           │
                           └───────────────────┬────────────────────┘
                                               │ programs
-  tenant veth ──▶ AF_XDP RX ──▶ ┌─────────────▼──────────────┐ ──▶ AF_XDP TX ──▶ underlay
-                  (bypass)      │      andromeda-dataplane     │
-                                │  parse → resolve → NAT →     │
-                                │  encap/decap  (Pipeline)     │
-                                └──────┬─────────────┬─────────┘
-                                       │             │
-                              andromeda-core   andromeda-nat
-                              (wire formats,   (SNAT/DNAT +
-                               checksums,       conntrack)
-                               Andromeda encap)
+  tenant veth ─▶ AF_XDP RX ─▶ ┌───────────────▼──────────────┐ ─▶ AF_XDP TX ─▶ underlay
+                 (bypass)     │  parse → resolve → NAT →       │
+                              │  encapsulate / decapsulate     │
+                              └────────────────────────────────┘
 ```
 
-| Crate | Responsibility | Notable property |
+**Wire format.** Inner Ethernet frame wrapped as `[outer Eth(14)][outer IPv4(20)]
+[outer UDP(8)][Andromeda(8)][inner frame]` — 50 bytes of overhead. The Andromeda
+header carries version/flags, inner-protocol, the 16-bit flow hash, a 24-bit VNI, and
+an overlay hop limit.
+
+**Distributed gateway.** Tenants never learn each other's MACs. Each switch answers
+every tenant ARP with one virtual gateway MAC and, on encapsulation, rewrites the
+inner destination MAC to the real endpoint's (from the fabric) — so the multi-node
+demo needs no static neighbours.
+
+**Policy/mechanism split in NAT.** The NAT engine *decides* (`process(5-tuple,
+direction) → Rewrite`) as pure logic; a separate `apply()` mutates bytes and fixes
+checksums. This makes the stateful logic unit-testable without synthesizing packets.
+
+---
+
+## 4. Implementation
+
+Rust workspace, five crates. `andromeda-core` (wire formats, checksums, overlay) is
+dependency-free and `#![forbid(unsafe_code)]`; `unsafe` is confined to the ~170-line C
+shim over the system `libxdp` and its Rust FFI. Two implementation choices carry the
+performance story and are detailed in §5: **header templating** (precompute the
+constant outer header once; per packet, patch only the variable fields and fold a
+five-term IPv4 checksum) and **zero-copy in-place encap** (when the inner frame is
+already in a UMEM frame with reserved headroom, stamp the header in front of it with
+no payload copy).
+
+---
+
+## 5. Methodology
+
+All microbenchmark numbers are from **one core of an AMD Ryzen 5 5600 (Zen 3; L1d
+32 KB/core, L2 512 KB/core, L3 32 MB shared)**, Rust `--release` with `opt-level=3`,
+`lto="fat"`, `codegen-units=1`, `panic="abort"`, running under WSL2 (Linux 6.6).
+
+**Protocol.** Each data point runs one discarded **warm-up** trial, then **7 timed
+trials**; we report the **mean ± sample standard deviation** (n = 7) and the best
+(min) trial. Each trial times millions of iterations via `std::time::Instant`; a
+`std::hint::black_box` on the accumulated result prevents the optimizer from eliding
+the loop. Reproduce with `andromeda bench` (matrix) and `andromeda bench --sweep`
+(the cache experiment); `--json` emits machine-readable output.
+
+**Threats this cannot remove** are stated in §8; chief among them are CPU
+frequency scaling (no `cpupower` pinning under WSL2) and the absence of hardware
+performance counters (`perf` has no PMU here), so we reason from throughput and an
+analytical model rather than measured IPC/miss rates.
+
+---
+
+## 6. Evaluation
+
+### 6.1 Forwarding-core throughput (mean ± sd, n = 7)
+
+| path | 60 B frame | 1396 B frame |
 |---|---|---|
-| `andromeda-core` | Zero-copy parse/build of Ethernet, IPv4, UDP, TCP, ARP; internet checksums; the Andromeda overlay format | **Dependency-free, `#![forbid(unsafe_code)]`** |
-| `andromeda-nat` | Stateful SNAT/PAT + DNAT with connection tracking | Pure *decision* + in-place *apply*, incremental checksums |
-| `andromeda-control` | Fabric map + TOML config | The SDN "map of the world" |
-| `andromeda-dataplane` | The per-packet pipeline + the AF_XDP socket loop | Two-buffer and zero-copy encap paths |
-| `andromeda-cli` | `andromeda` binary: selftest / bench / inspect / run / switch | — |
+| encap · copy (RX→TX) | 15.7 ± 0.3 ns · **64 Mpps** | 29.0 ± 0.3 ns · 34 Mpps |
+| encap · zero-copy (1 frame) | 14.5 ± 0.7 ns · 69 Mpps | 14.2 ± 0.2 ns · 70 Mpps |
+| encap · zero-copy (batch) | 13.4 ± 2.1 ns · 75 Mpps | 12.1 ± 0.1 ns · **83 Mpps** |
+| decap | 10.6 ± 0.3 ns · **95 Mpps** | 19.7 ± 0.2 ns · 51 Mpps |
+| encap + SNAT (conntrack) | 57 ± 1.4 ns · 17 Mpps | 75 ± 4.5 ns · 13 Mpps |
 
-The **data plane** (fast, per-packet) and **control plane** (slow, "where does
-`10.0.0.20` live?") are cleanly separated — the same split a real SDN uses.
+Observations. **(i)** Zero-copy encap is essentially frame-size independent (it never
+touches the payload); the copy path is not (it memcpys the inner frame). **(ii)**
+**Decap is the fastest path** — it validates and copies out but builds no header — and
+is the one path that clears ~100 Mpps on a good trial (best 10.2 ns → 98 Mpps).
+**(iii)** SNAT costs ~4× a plain encap: the honest price of a conntrack hash
+lookup/insert plus incremental-checksum fixups, *not* a payload rescan.
 
----
+### 6.2 The optimization trajectory
 
-## 3. The Andromeda wire format
+Six changes took 60-byte east-west encap from the first working cut to the operating
+point above. Each is standard dataplane practice; none games the benchmark.
 
-An inner tenant Ethernet frame is wrapped as **L2-over-UDP**, the same shape as
-VXLAN/GENEVE, with a custom 8-byte header:
-
-```
-[ outer Ethernet ][ outer IPv4 ][ outer UDP ][ Andromeda(8) ][ inner Ethernet frame … ]
-     14               20             8            8            (the tenant's packet)
- └──────────────────── 50 bytes of overlay overhead ─────────┘
-```
-
-```
-Andromeda header
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Ver | Flags |  Inner proto  |           Flow hash           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     VNI (24 bits)              |  Hop limit  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-- **VNI (24 bit)** — the tenant/VPC id, so overlapping tenant address spaces stay
-  isolated (this is what makes `10.0.0.0/24` safe to reuse).
-- **Flow hash (16 bit)** — a hash of the inner 5-tuple, also copied into the *outer*
-  UDP source port so the underlay's own ECMP spreads a tenant's flows across paths
-  without looking inside the tunnel.
-- **Hop limit** — an overlay TTL guarding against encapsulation loops.
-
-The header is dissectable interactively with `andromeda inspect` and in the browser
-playground (`docs/playground.html`).
-
----
-
-## 4. The datapath
-
-**Egress (tenant → underlay).** Parse the inner Ethernet/IPv4; look the inner
-destination up in the fabric; if it leaves the VPC, SNAT it; wrap it in the overlay
-toward the destination node; hand the bytes to TX. **Ingress (underlay → tenant).**
-Verify it's Andromeda traffic (outer UDP port + VNI), strip the overlay, optionally
-reverse-NAT, and deliver the inner frame to the tenant port.
-
-Three design decisions carry most of the weight:
-
-**Zero-copy views.** Every parser is a *view* over a borrowed byte slice; the packet
-lives once, in the UMEM frame, and the code only reads or patches bytes in place.
-
-**Incremental checksums (RFC 1624).** When NAT rewrites an address or a port, the
-L3/L4 checksums are **not** recomputed over the payload — they are adjusted by the
-one's-complement delta of just the changed 16-bit words. A test proves the
-incremental result is bit-identical to a from-scratch recompute.
-
-**Distributed gateway (proxy-ARP).** Tenants never learn each other's real MACs.
-Each switch answers every tenant ARP with one virtual gateway MAC; on encapsulation
-it rewrites the inner destination MAC to the real endpoint's (from the fabric). This
-is why the two-node demo needs no static neighbours.
-
----
-
-## 5. Correctness
-
-- **41 unit tests** cover every parser, every checksum path, NAT (SNAT/DNAT/GC),
-  the fabric, the config loader, the pipeline, and proxy-ARP.
-- **Checksum invariants** are asserted against known-good packet vectors and against
-  full-recompute baselines.
-- **Cross-implementation round-trip.** The browser playground re-implements the exact
-  byte assembly in JavaScript; a packet it builds decodes **byte-for-byte identically**
-  under the Rust `andromeda inspect` (verified: outer + inner IPv4 checksums valid,
-  VNI/flow/ports match). Two independent implementations agreeing is strong evidence
-  the wire format is specified, not accidental.
-- **Two path-equivalence test:** the copy and zero-copy encap paths must produce
-  byte-identical output.
-- **End-to-end:** a real `ping` traverses two switches over the overlay — 4/4, 0% loss.
-
----
-
-## 6. Performance engineering
-
-All numbers below: single core of an **AMD Ryzen 5 5600 (Zen 3)**, `--release`
-(`opt-level=3`, `lto="fat"`), in-cache microbenchmark of the forwarding logic
-(no sockets). Reproduce with `andromeda bench` / `andromeda bench --json`.
-
-### 6.1 The journey (60-byte inner frame, east-west encap)
-
-| Step | ns/pkt | Mpps | What changed |
-|---|---|---|---|
-| First working cut | 52 | 19 | scratch buffer, double copy, full outer UDP checksum, SipHash resolve |
-| Single-copy + no outer UDP cksum | 22 | 45 | `encap_in_place`; outer UDP checksum 0 (RFC 6935 / VXLAN); `FxHashMap` |
-| `#[inline]` + fat LTO | 19.8 | 50 | hot builders inline; whole-program optimization |
-| Fast flow hash | 16 | 60 | multiply-xor mix (parallel) replaces a 13-deep FNV dependency chain |
-| **Header templating** | **15.5** | **65** | constant outer header precomputed; only variable fields patched, 5-add checksum |
-| **Zero-copy in-place** | **11** | **~90** | header stamped into UMEM headroom; **no payload copy** |
-
-That is **3.4× faster copying** and **~4.7× faster zero-copy**. Every change is
-standard dataplane practice; none of it games the benchmark.
-
-### 6.2 Full result matrix
-
-| path | 60 B | 1396 B |
+| step | ns/pkt (best) | what changed |
 |---|---|---|
-| encap copy (east-west) | 65 Mpps · 15 ns | 33 Mpps · 30 ns |
-| encap zero-copy (1 hot frame) | ~90 Mpps · 11 ns | ~91 Mpps · 11 ns |
-| encap zero-copy (batch, 64 KB working set) | ~85 Mpps · 12 ns | ~85 Mpps · 12 ns |
-| **decap** | **~108 Mpps · 9 ns** | 37 Mpps · 27 ns |
-| encap + SNAT (conntrack) | ~17 Mpps · 58 ns | ~14 Mpps · 72 ns |
+| first working cut | 52 | scratch buffer, double copy, full outer UDP checksum, SipHash |
+| single-copy, no outer UDP cksum | 22 | `encap_in_place`; checksum 0 (RFC 6935 [8], as VXLAN); `FxHashMap` |
+| `#[inline]` + fat LTO | 20 | whole-program inlining of the hot builders |
+| parallel flow hash | 16 | multiply-xor mix replaces a 13-deep FNV dependency chain |
+| header templating | 15.5 | precomputed outer header; 5-add incremental IPv4 checksum |
+| zero-copy in-place | 12–14 | header into UMEM headroom; **no payload copy** |
 
-Notes worth reading:
+The large jumps are *removing work*, not cleverness: stop copying twice; stop
+scanning the payload for a checksum the spec lets you omit; replace a collision-
+resistant per-packet hash (SipHash) with a fast one; precompute the constant header.
 
-- **Decap exceeds 100 Mpps** on small frames — it validates and copies out but builds
-  no header, so it is genuinely cheaper than encap.
-- **SNAT is ~4× slower** than plain encap — that is the honest cost of connection
-  tracking (a hash-map lookup/insert) plus the incremental checksum fixups, *not* a
-  payload rescan. It is the price of statefulness.
-- The "wire Gbit/s" for large frames looks enormous (>300) precisely because the
-  zero-copy path never touches the payload; it is not a line-rate claim.
+### 6.3 Compute- or memory-bound? A controlled cache experiment
 
-### 6.3 The key finding: memory-bound, not compute-bound
+The batch path (many frames) did not beat the single-hot-frame path, which *suggested*
+a memory bound. That reasoning is too crude — a single reused frame is L1-resident and
+flatters the result. To test it properly we sweep the **working-set size** (contiguous
+128-byte frames, 4 KB → 64 MB) under two **access orders**: sequential (as packed) and
+a deterministic **shuffle** (random frame order, defeating the hardware prefetcher, and
+closer to how a NIC hands back recycled UMEM frames). Throughput (Mpps), best of 2:
 
-Batching 32 frames per call to amortize overhead and remove per-packet counter
-dependencies **did not help** — ~85 Mpps batched vs ~90 Mpps for a single, L1-hot
-frame. The single-frame path reuses one buffer that stays in L1; the batch touches a
-64 KB working set that spills to L2, and *that* is the difference.
+| working set | sequential | shuffled | regime |
+|---:|---:|---:|---|
+| 16 KB | 80 | 82 | fits L1 |
+| 128 KB | 82 | 81 | fits L2 |
+| 256 KB | 82 | 76 | fits L2 |
+| 512 KB | 80 | **59** | L2 edge |
+| 1 MB | 81 | 54 | L3 |
+| 4 MB | 82 | 54 | L3 |
+| 8 MB | 82 | 37 | L3 |
+| 16 MB | 80 | **13** | L3→DRAM |
+| 64 MB | 79 | **8.7** | DRAM |
 
-The implication is important and non-obvious: **the encap datapath is bounded by
-memory movement, not arithmetic.** Adding SIMD to the header stamping — the usual
-next step — would optimize the part that is already cheap. The honest way past
-~90 Mpps single-core is *less* per-packet memory traffic (true zero-copy everywhere,
-larger frames, or hardware offload), or *more* cores — not a cleverer inner loop.
+**This refutes the memory-bandwidth hypothesis and replaces it with a sharper claim.**
+Under sequential access, throughput is **flat at ~80 Mpps across five orders of
+magnitude of working set** — the prefetcher hides all latency, so the datapath is
+**compute-bound**. Under random access the same code tracks the **cache hierarchy
+exactly**: level with sequential inside L2, a knee at the 512 KB L2 boundary, a slower
+decline through L3, and a collapse to **~9 Mpps (a 9× slowdown)** once the working set
+exceeds L3 and every packet pays a DRAM miss — i.e. **memory-latency-bound**.
 
-This is why the project does **not** ship a fake "100 Mpps" number from, say, a
-single-flow next-hop cache with a 100% hit rate: on the single-flow benchmark that
-would "work" and mean nothing.
+The operating regime therefore depends on locality, not on the code. A real switch's
+hot state is a few thousand UMEM frames (single-digit MB) recycled in roughly FIFO
+order — between these curves, but near the compute ceiling for well-behaved traffic.
+The practical lesson: past ~80 Mpps/core, the lever is *locality and less memory
+traffic* (larger frames, true zero-copy everywhere, NIC offload), not a cleverer inner
+loop — which is also why SIMD, and a single-flow next-hop cache that would only "win"
+on this single-flow benchmark, were deliberately *not* pursued.
+
+### 6.4 An analytical (roofline) model
+
+Two ceilings bracket the measurements. **Compute:** 12.2 ns/packet at ~4.4 GHz is
+~54 cycles/packet for parse + hash + fabric lookup + 42-byte header stamp + a
+five-term checksum — a plausible retirement rate for this instruction mix, and the
+sequential-access asymptote. **Memory bandwidth** is *not* the limit: at 80 Mpps the
+path touches on the order of 100 bytes/packet ≈ 8 GB/s, far under single-core cache
+bandwidth (the sequential curve confirms this — flat even at 64 MB). The **memory-
+latency wall** is separate: at 64 MB shuffled, 115 ns/packet ≈ one largely-uncovered
+DRAM access per packet (~80–100 ns), matching the collapse. The design sits at the
+compute ceiling and only falls off the latency wall when locality is destroyed —
+exactly what §6.3 shows.
+
+### 6.5 Live AF_XDP evaluation
+
+Microbenchmarks measure the logic ceiling; a live socket adds the I/O it ignores.
+On WSL2 veth (generic/SKB XDP, copy mode, single core), fed 64-byte UDP by a
+`sendmmsg` generator in a peer namespace: the switch **pulled and encapsulated 100 %
+of the offered load with zero receive drops**, up to the **~2.6 Mpps** the generator
+could offer across 8 processes; **TX back onto the veth saturated near ~0.6 Mpps** in
+copy mode, dropping the rest at the TX ring. The overlay adds **~0.2 ms** RTT over the
+kernel path. The live ceiling here is the veth + generic-XDP + copy-mode I/O path and
+the generator — **not the dataplane**, which was never the bottleneck. Native-mode,
+zero-copy AF_XDP on a real NIC would close this gap; demonstrating it is future work
+(§9), not a WSL2 experiment.
+
+### 6.6 Correctness
+
+41 unit tests cover every parser, checksum path, NAT operation, the fabric and config
+loader, the pipeline, and proxy-ARP. Checksum invariants are asserted against
+known-good vectors and against full-recompute baselines (the incremental update is
+proven bit-identical). Two stronger checks: **(a)** the browser playground
+re-implements the byte assembly in JavaScript and a packet it builds decodes
+**byte-for-byte identically** under the Rust decoder (two independent implementations
+agreeing on the wire format); **(b)** the copy and zero-copy encap paths are asserted
+byte-identical. End-to-end, a real `ping` crosses two switches over the overlay:
+4/4, 0 % loss.
 
 ---
 
-## 7. Live evaluation
+## 7. Discussion
 
-Microbenchmarks measure the *logic ceiling*. A live socket adds the I/O the ceiling
-ignores. Measured on the WSL2 veth setup (generic/SKB XDP, copy mode, single core),
-feeding the switch 64-byte UDP from a `sendmmsg` generator in a peer namespace:
+The headline is not the peak number; it is that the peak number *has a regime*. A
+common failure in systems benchmarking is to report a single cache-hot figure as "the"
+throughput. The §6.3 experiment shows how misleading that is here: the same binary
+runs at 80 Mpps or 9 Mpps depending only on access locality. Reporting the sequential
+asymptote without the shuffled curve would overstate real-world performance by up to
+9×. The honest summary is a *pair of curves*, and the design's job is to keep traffic
+in the favorable regime (small hot working set, sequential-ish frame reuse).
 
-- **RX + encapsulate:** the switch pulled and encapsulated **100 % of the offered
-  load with zero RX drops** — up to the **~2.6 Mpps** the generator could offer.
-  The receive/processing path was never the bottleneck.
-- **TX back onto the veth** saturated near **~0.6 Mpps** in SKB copy mode; beyond that,
-  frames were dropped at the TX ring.
-- **Latency:** the two-node overlay adds **~0.2 ms** RTT over the kernel path on veth.
+## 8. Threats to validity
 
-So the live ceiling here is the **veth + generic-XDP + copy-mode I/O path and the
-generator**, not the dataplane. On a real NIC with native XDP and zero-copy this gap
-closes dramatically; demonstrating that is future work, not a WSL2 experiment.
-
----
-
-## 8. Limitations & threats to validity
-
-- **Microbench caveats.** Single core, in cache, no NUMA, no cache-cold frames from a
-  real NIC DMA. The numbers are an upper bound on the logic, clearly labelled as such.
-- **WSL2 / veth / SKB.** Generic XDP in copy mode over veth is well below a real NIC
-  in native/zero-copy mode; the live numbers reflect that environment, not the design.
-- **Scope.** Single VPC per switch, IPv4 only, a fully-provisioned endpoint table
-  (no MAC learning), no fragmentation/PMTU, no encryption (the flag bit is reserved).
-  These are deliberate — the point was depth on the core mechanism, not breadth.
+- **Frequency scaling.** No `cpupower`/pinning under WSL2; sustained trials run below
+  peak boost. The warm-up + mean±sd protocol reduces but does not remove this; treat
+  absolute Mpps as ±10 %, and prefer the *shape* of §6.3 to its absolute values.
+- **No hardware counters.** `perf` has no PMU under WSL2, so IPC/miss-rate claims are
+  modelled (§6.4), not measured.
+- **Virtualization.** WSL2 adds scheduler and timer noise; a bare-metal Linux host
+  would give cleaner numbers.
+- **Access-pattern brackets.** Sequential is prefetcher-ideal; shuffled is worst-case.
+  Real UMEM recycling lies between; §6.3 brackets rather than pinpoints the operating
+  point.
+- **Excluded costs.** The microbench omits syscalls, NIC DMA, and interrupt/poll
+  overhead; §6.5 addresses these only qualitatively and in a weak (SKB/veth) environment.
+- **Single core / socket.** L3 is shared with five other cores; contention is untested.
 
 ## 9. Future work
 
-- **Native-mode / zero-copy AF_XDP on a real NIC** and an honest line-rate number.
-- **Multi-VPC** on one switch (VNI keyed by ingress port), **IPv6 + ND**.
-- **MAC learning** instead of a provisioned endpoint table.
-- **Shared-UMEM** between the two ports so the two-interface switch is zero-copy too.
-- **SIMD** batch header-stamping — worth it only once the path is no longer memory-bound.
+Native-mode, zero-copy AF_XDP on a real NIC with an honest line-rate number and PMU
+data; multi-VPC per switch (VNI by ingress port) and IPv6/ND; MAC learning instead of
+a provisioned table; shared-UMEM zero-copy across both switch ports; and a SIMD /
+vectorized batch stamp — worthwhile only for the compute-bound regime §6.3 identifies.
 
-## 10. Reproduce
+## 10. Conclusion
+
+Light-Andromeda is a small but complete overlay dataplane that is correct (verified
+two ways, real ping end-to-end), fast (19 → ~80 Mpps/core through disciplined
+work-removal), and — most usefully — *honestly characterized*: a controlled
+working-set × access-pattern experiment shows the datapath is compute-bound when
+cache-resident and memory-latency-bound otherwise, correcting the author's own first
+guess. The intent was depth and intellectual honesty on the core mechanism over
+breadth of features.
+
+## Appendix A. Reproducibility
 
 ```bash
-cargo test --workspace                 # 41 tests, portable
-cargo run -p andromeda-cli -- bench            # performance table
-cargo run -p andromeda-cli -- bench --json     # machine-readable
-cargo run -p andromeda-cli -- inspect          # decode a synthesized overlay packet
-
-# real datapath (Linux + libxdp-dev + libbpf-dev, root):
+cargo test --workspace                       # 41 tests
+cargo run -p andromeda-cli --release -- bench          # §6.1 matrix (mean±sd)
+cargo run -p andromeda-cli --release -- bench --sweep  # §6.3 cache experiment
+cargo run -p andromeda-cli --release -- bench --json   # machine-readable
+# live datapath (Linux + libxdp-dev + libbpf-dev, root):
 cargo build --release -p andromeda-cli --features afxdp
-sudo ./scripts/demo-2node.sh                   # ping through the overlay
+sudo ./scripts/demo-2node.sh                 # ping through the overlay
 ```
+
+Machine: AMD Ryzen 5 5600, WSL2 (Linux 6.6), Rust stable, release profile as in §5.
 
 ## References
 
-- Dalton et al., *Andromeda: Performance, Isolation, and Velocity at Scale in Cloud
-  Network Virtualization*, NSDI 2018.
-- RFC 7348 (VXLAN), RFC 8926 (GENEVE) — L2-over-UDP overlays.
-- RFC 1624 — incremental internet checksum update.
-- RFC 6935 — zero UDP checksum for IPv6/IPv4 tunnels.
-- `AF_XDP` and `libxdp` — kernel documentation and the xdp-project.
-
----
-
-*Light-Andromeda is a portfolio/learning project — a deliberately small but complete
-and honest implementation of a large idea.*
+[1] M. Dalton et al. *Andromeda: Performance, Isolation, and Velocity at Scale in
+Cloud Network Virtualization.* NSDI 2018.
+[2] M. Mahalingam et al. *VXLAN.* RFC 7348, 2014.
+[3] J. Gross et al. *GENEVE.* RFC 8926, 2020.
+[4] *AF_XDP.* Linux kernel documentation; M. Karlsson and B. Töpel.
+[5] M. Marty et al. *Snap: a Microkernel Approach to Host Networking.* SOSP 2019.
+[6] T. Høiland-Jørgensen et al. *The eXpress Data Path.* CoNEXT 2018.
+[7] D. Barach et al. *FD.io VPP: Vector Packet Processing.* 
+[8] M. Eubanks et al. *UDP Checksums for Tunneled Packets.* RFC 6935, 2013.
+[9] A. Rijsinghani. *Computation of the Internet Checksum via Incremental Update.*
+RFC 1624, 1994.

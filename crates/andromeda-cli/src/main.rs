@@ -40,7 +40,8 @@ fn print_help() {
         "andromeda — Light-Andromeda switch\n\n\
          USAGE:\n  \
            andromeda selftest\n  \
-           andromeda bench [iterations]\n  \
+           andromeda bench [n] [--json]   perf table, mean +/- sd over trials\n  \
+           andromeda bench --sweep        working-set sweep (cache-hierarchy experiment)\n  \
            andromeda inspect [hex]        decode a packet (or a synthesized overlay one)\n  \
            andromeda run <iface> [options]\n  \
            andromeda switch --tenant <if> --underlay <if> [--config f.toml] [options]\n\n\
@@ -306,82 +307,113 @@ fn decode_frame(bytes: &[u8], depth: usize) {
 
 // ---- bench subcommand -----------------------------------------------------
 
-/// Micro-benchmark the forwarding core (no sockets): how fast can one core parse,
-/// (optionally) SNAT, and Andromeda-encapsulate a packet? Pure logic, no root.
+/// Micro-benchmark the forwarding core (no sockets). Reports mean +/- sample
+/// standard deviation and best over repeated trials, so the numbers come with an
+/// error bar instead of a single noisy sample. `--sweep` maps throughput against
+/// working-set size (the cache-hierarchy experiment); `--json` emits machine-readable data.
 struct BenchRow {
     path: &'static str,
     frame_bytes: usize,
-    ns_per: f64,
+    mean_ns: f64,
+    std_ns: f64,
+    min_ns: f64,
+    reps: usize,
+}
+
+/// Sample mean, sample standard deviation (n-1), and minimum.
+fn stats(s: &[f64]) -> (f64, f64, f64) {
+    let n = s.len() as f64;
+    let mean = s.iter().sum::<f64>() / n;
+    let var = if s.len() > 1 {
+        s.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+    } else {
+        0.0
+    };
+    let min = s.iter().copied().fold(f64::INFINITY, f64::min);
+    (mean, var.sqrt(), min)
+}
+
+/// Run `reps` trials of `iters` calls, each processing `n_per` packets; return the
+/// per-trial ns-per-packet samples (best of a warmup discarded implicitly by taking
+/// the minimum in the caller).
+fn measure<F: FnMut() -> bool>(reps: usize, iters: u64, n_per: u64, mut f: F) -> Vec<f64> {
+    // One warmup trial (not recorded) to page in and reach steady frequency.
+    time_loop(iters, &mut f);
+    (0..reps)
+        .map(|_| time_loop(iters, &mut f) as f64 / (iters * n_per) as f64)
+        .collect()
 }
 
 fn bench_cmd(args: &[String]) {
+    if args.iter().any(|a| a == "--sweep") {
+        return bench_sweep(args.iter().any(|a| a == "--json"));
+    }
     use andromeda_core::overlay::OVERLAY_OVERHEAD;
     use andromeda_dataplane::{Decision, FrameSlot};
 
     let json = args.iter().any(|a| a == "--json");
-    let iters: u64 = args
+    let total: u64 = args
         .iter()
         .find(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|s| s.parse().ok())
-        .unwrap_or(20_000_000);
+        .unwrap_or(21_000_000);
+    const REPS: usize = 7;
+    let iters = (total / REPS as u64).max(1);
 
     let mut rows: Vec<BenchRow> = Vec::new();
 
     for &payload_len in &[18usize, 1354usize] {
-        // 18 -> ~64B inner frame; 1354 -> ~1400B inner frame.
         let frame = udp_tenant_frame("10.0.0.10", "10.0.0.20", 40000, 4242, payload_len);
         let inner_len = frame.len();
         let ioff = OVERLAY_OVERHEAD;
 
-        let mut push = |path: &'static str, ns_total: u64, n: u64| {
+        let mut push = |path, s: Vec<f64>| {
+            let (mean, std, min) = stats(&s);
             rows.push(BenchRow {
                 path,
                 frame_bytes: inner_len,
-                ns_per: ns_total as f64 / n as f64,
+                mean_ns: mean,
+                std_ns: std,
+                min_ns: min,
+                reps: s.len(),
             });
         };
 
-        // Copy path (separate RX/TX buffers), east-west and egress+SNAT.
         let mut ew = build_pipeline(true, false);
         let mut nat = build_pipeline(false, true);
         let mut out = vec![0u8; 2048];
         push(
             "encap copy (east-west)",
-            time_loop(iters, || {
+            measure(REPS, iters, 1, || {
                 matches!(
                     ew.on_tenant_frame(&frame, &mut out, 0),
                     Decision::Forward(_)
                 )
             }),
-            iters,
         );
         push(
             "encap copy + SNAT",
-            time_loop(iters, || {
+            measure(REPS, iters, 1, || {
                 matches!(
                     nat.on_tenant_frame(&frame, &mut out, 0),
                     Decision::Forward(_)
                 )
             }),
-            iters,
         );
 
-        // Zero-copy, single L1-hot frame (optimistic upper bound).
         let mut ewz = build_pipeline(true, false);
         let mut zc = vec![0u8; 2048];
         zc[ioff..ioff + inner_len].copy_from_slice(&frame);
         push(
             "encap zero-copy (1 hot frame)",
-            time_loop(iters, || {
+            measure(REPS, iters, 1, || {
                 matches!(
                     ewz.on_tenant_frame_inplace(&mut zc, inner_len, 0),
                     Decision::Forward(_)
                 )
             }),
-            iters,
         );
 
-        // Zero-copy batch over a 64 KB working set (realistic locality).
         const BATCH: usize = 32;
         const STRIDE: usize = 2048;
         let mut ewb = build_pipeline(true, false);
@@ -398,14 +430,12 @@ fn bench_cmd(args: &[String]) {
             .collect();
         let bi = iters / BATCH as u64;
         push(
-            "encap zero-copy (batch, 64KB)",
-            time_loop(bi, || {
+            "encap zero-copy (batch 32)",
+            measure(REPS, bi, BATCH as u64, || {
                 ewb.encap_batch_inplace(&mut umem, &slots, 0) == BATCH
             }),
-            bi * BATCH as u64,
         );
 
-        // Decap (underlay -> tenant).
         let mut dz = build_pipeline(true, false);
         let mut wire = vec![0u8; 2048];
         let n = match dz.on_tenant_frame(&frame, &mut wire, 0) {
@@ -417,46 +447,139 @@ fn bench_cmd(args: &[String]) {
         let mut dout = vec![0u8; 2048];
         push(
             "decap (underlay->tenant)",
-            time_loop(iters, || {
+            measure(REPS, iters, 1, || {
                 matches!(
                     dd.on_underlay_frame(&encapped, &mut dout, 0),
                     Decision::Forward(_)
                 )
             }),
-            iters,
         );
     }
 
     if json {
         print!("[");
         for (i, r) in rows.iter().enumerate() {
-            let mpps = 1000.0 / r.ns_per;
-            let gbps = mpps * 1e6 * (r.frame_bytes as f64 + 50.0) * 8.0 / 1e9;
+            let mpps = 1000.0 / r.mean_ns;
             print!(
-                "{}{{\"path\":\"{}\",\"frame_bytes\":{},\"ns_per_pkt\":{:.2},\"mpps\":{:.2},\"gbit_s_wire\":{:.1}}}",
-                if i == 0 { "" } else { "," },
-                r.path,
-                r.frame_bytes,
-                r.ns_per,
-                mpps,
-                gbps
+                "{}{{\"path\":\"{}\",\"frame_bytes\":{},\"mean_ns\":{:.3},\"std_ns\":{:.3},\"min_ns\":{:.3},\"reps\":{},\"mpps\":{:.2}}}",
+                if i == 0 { "" } else { "," }, r.path, r.frame_bytes, r.mean_ns, r.std_ns, r.min_ns, r.reps, mpps
             );
         }
         println!("]");
     } else {
+        println!(
+            "forwarding-core microbenchmark  (mean +/- sd over {REPS} trials, 1 warmup discarded)"
+        );
         let mut last = 0usize;
         for r in &rows {
             if r.frame_bytes != last {
                 println!("\ninner frame = {} bytes", r.frame_bytes);
                 last = r.frame_bytes;
             }
-            let mpps = 1000.0 / r.ns_per;
-            let gbps = mpps * 1e6 * (r.frame_bytes as f64 + 50.0) * 8.0 / 1e9;
+            let mpps = 1000.0 / r.mean_ns;
             println!(
-                "  {:<30} {:6.1} ns/pkt   {:6.2} Mpps   {:7.1} Gbit/s (wire)",
-                r.path, r.ns_per, mpps, gbps
+                "  {:<30} {:6.2} +/- {:.2} ns/pkt  (best {:5.2})   {:6.2} Mpps",
+                r.path, r.mean_ns, r.std_ns, r.min_ns, mpps
             );
         }
+    }
+}
+
+/// Working-set sweep: throughput of the zero-copy batch encap as the resident data
+/// grows from a few KB (L1) to tens of MB (DRAM), under two access orders:
+/// **sequential** (prefetcher-friendly, as this benchmark packs frames) and
+/// **shuffled** (random frame order, defeating the prefetcher — closer to how a NIC
+/// hands back recycled UMEM frames). Comparing the two isolates the cache hierarchy's
+/// contribution and tests whether the datapath is compute- or memory-bound.
+fn bench_sweep(json: bool) {
+    use andromeda_core::overlay::OVERLAY_OVERHEAD;
+    use andromeda_dataplane::FrameSlot;
+
+    let payload_len = 18usize; // ~64-byte inner frame
+    let frame = udp_tenant_frame("10.0.0.10", "10.0.0.20", 40000, 4242, payload_len);
+    let inner_len = frame.len();
+    let stride = (OVERLAY_OVERHEAD + inner_len).div_ceil(64) * 64; // 128 B, cache-line aligned
+    let targets_kb: [usize; 20] = [
+        4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 384, 512, 768, 1024, 2048, 4096, 8192, 16384,
+        32768, 65536,
+    ];
+
+    // Deterministic xorshift Fisher-Yates shuffle (no external rng).
+    fn shuffle(v: &mut [FrameSlot]) {
+        let mut s: u32 = 0x9e3779b9;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        for i in (1..v.len()).rev() {
+            let j = (rng() as usize) % (i + 1);
+            v.swap(i, j);
+        }
+    }
+
+    let bench_one = |slots: &[FrameSlot], umem: &mut [u8], n_frames: usize| -> f64 {
+        let mut p = build_pipeline(true, false);
+        let calls = (40_000_000u64 / n_frames as u64).max(4);
+        p.encap_batch_inplace(umem, slots, 0); // warmup
+        let mut best = f64::INFINITY;
+        for _ in 0..2 {
+            let ns = time_loop(calls, || p.encap_batch_inplace(umem, slots, 0) == n_frames);
+            best = best.min(ns as f64 / (calls * n_frames as u64) as f64);
+        }
+        1000.0 / best // Mpps
+    };
+
+    if !json {
+        println!(
+            "working-set sweep: zero-copy batch encap, {inner_len}B inner, {stride}B/frame stride"
+        );
+        println!("AMD Ryzen 5 5600 — L1d 32KB/core, L2 512KB/core, L3 32MB shared\n");
+        println!("  working set     frames    seq Mpps   shuffled Mpps");
+    }
+    let mut out = String::from("[");
+    for (i, &ws_kb) in targets_kb.iter().enumerate() {
+        let n_frames = ((ws_kb * 1024) / stride).max(1);
+        let mut umem = vec![0u8; n_frames * stride];
+        let mut seq: Vec<FrameSlot> = (0..n_frames)
+            .map(|j| {
+                let off = j * stride;
+                umem[off + OVERLAY_OVERHEAD..off + OVERLAY_OVERHEAD + inner_len]
+                    .copy_from_slice(&frame);
+                FrameSlot {
+                    offset: off,
+                    inner_len,
+                }
+            })
+            .collect();
+        let seq_mpps = bench_one(&seq, &mut umem, n_frames);
+        shuffle(&mut seq);
+        let shuf_mpps = bench_one(&seq, &mut umem, n_frames);
+
+        if json {
+            use std::fmt::Write;
+            let _ = write!(
+                out,
+                "{}{{\"ws_kb\":{},\"frames\":{},\"seq_mpps\":{:.2},\"shuffled_mpps\":{:.2}}}",
+                if i == 0 { "" } else { "," },
+                ws_kb,
+                n_frames,
+                seq_mpps,
+                shuf_mpps
+            );
+        } else {
+            let ws_label = if ws_kb >= 1024 {
+                format!("{} MB", ws_kb / 1024)
+            } else {
+                format!("{ws_kb} KB")
+            };
+            println!("  {ws_label:>10}   {n_frames:>9}    {seq_mpps:7.2}      {shuf_mpps:7.2}");
+        }
+    }
+    if json {
+        out.push(']');
+        println!("{out}");
     }
 }
 

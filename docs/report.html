@@ -134,9 +134,9 @@
     <h1>Building a kernel-bypass VPC overlay, one byte at a time</h1>
     <p class="lede">Light-Andromeda is a from-scratch miniature of the software layer cloud providers run under every VM — the thing that gives a tenant a private network that isn't real. It parses packets by hand, wraps them in a custom overlay, forwards them by a centrally-programmed map, and moves them in user space past the kernel's network stack with AF_XDP. A real ping travels through it.</p>
     <div class="hero-stats">
-      <div class="hstat hi"><div class="n">19&nbsp;→&nbsp;90 <span class="u">Mpps</span></div><div class="k">encap, 1 core</div></div>
+      <div class="hstat hi"><div class="n">19&nbsp;→&nbsp;~80 <span class="u">Mpps</span></div><div class="k">encap, 1 core (mean)</div></div>
       <div class="hstat"><div class="n">4 / 4 <span class="u">0% loss</span></div><div class="k">ping through overlay</div></div>
-      <div class="hstat"><div class="n">~3,700 <span class="u">lines Rust</span></div><div class="k">+168 lines C shim</div></div>
+      <div class="hstat"><div class="n">9× <span class="u">swing</span></div><div class="k">by access locality</div></div>
       <div class="hstat"><div class="n">41 <span class="u">tests</span></div><div class="k">clippy + fmt clean</div></div>
     </div>
   </header>
@@ -179,7 +179,7 @@
   <p class="sub">Dissect it live: the browser playground and <code>andromeda inspect</code> build byte-identical packets — verified two ways.</p>
 
   <h2><span class="num">04</span>Making it fast</h2>
-  <p class="sub">single core · AMD Ryzen 5 5600 · release build · in-cache microbenchmark of the forwarding logic · 60-byte inner frame, east-west encap</p>
+  <p class="sub">single core · AMD Ryzen 5 5600 · release build · microbenchmark of the forwarding logic · mean of 7 trials (1 warm-up discarded) · 60-byte inner frame, east-west encap</p>
   <p>The first working version did 19 Mpps. Six changes — each standard dataplane practice, none of them gaming the benchmark — took the encapsulation core to ~90 Mpps:</p>
 
   <div class="card">
@@ -188,7 +188,7 @@
   <p>Reading the chart: the big jumps are <b>removing work</b>, not clever tricks. Stop copying the frame twice. Stop scanning the payload for an outer UDP checksum the spec lets you omit (RFC 6935, exactly what VXLAN does). Replace a per-packet hash built to resist collisions (SipHash) with one built to be fast. Precompute the constant outer header once. And finally, when the frame is already in the AF_XDP buffer, stamp the header into its headroom and <b>never copy the payload at all</b>.</p>
 
   <h3>The full matrix</h3>
-  <p class="sub">Mpps per path; the bar under each number scales to 108 Mpps</p>
+  <p class="sub">mean Mpps over 7 trials; the bar under each number scales to 100 Mpps</p>
   <div class="tablewrap">
     <table id="matrix">
       <thead><tr><th>Forwarding path</th><th style="text-align:right">60 B frame</th><th style="text-align:right">1396 B frame</th></tr></thead>
@@ -196,8 +196,11 @@
     </table>
   </div>
 
+  <h3>Compute- or memory-bound? A controlled experiment</h3>
+  <p>Batching frames didn't beat a single hot frame — which <em>looked</em> like a memory bound. That reasoning is too crude: one reused frame is L1-resident and flatters the result. The honest test sweeps the <b>working-set size</b> (4&nbsp;KB → 64&nbsp;MB) under two <b>access orders</b> — sequential (as packed, prefetcher-friendly) and shuffled (random frame order, defeating the prefetcher, closer to how a NIC hands back recycled buffers):</p>
+  <div class="card"><div id="sweep" role="img" aria-label="Throughput versus working-set size: sequential access is flat near 80 Mpps; shuffled access collapses to about 9 Mpps past the L3 cache."></div></div>
   <div class="callout">
-    <p><b>The finding that matters.</b> Batching 32 frames per call — the usual next optimization — <em>didn't help</em> (~85 Mpps vs ~90 for a single L1-hot frame). The single frame reuses one cache-hot buffer; the batch touches a 64&nbsp;KB working set that spills to L2, and that is the whole difference. So the datapath is <b>memory-bound, not compute-bound</b>: adding SIMD would speed up the part that's already cheap. That's why there's no fake "100 Mpps" here from a single-flow cache — the honest path past ~90 on one core is <em>less memory traffic</em>, not a cleverer loop. (Decapsulation, which builds no header, genuinely does clear 100 Mpps.)</p>
+    <p><b>The experiment refutes the guess — and says something sharper.</b> Sequential access is <b>flat at ~80 Mpps across five orders of magnitude</b> of working set: the hardware prefetcher hides all latency, so the code is <b>compute-bound</b>. Random access tracks the cache hierarchy exactly — level inside L2, a knee at the 512&nbsp;KB L2 boundary, and a collapse to <b>~9 Mpps (9× slower)</b> once the set exceeds the 32&nbsp;MB L3 and every packet pays a DRAM miss: <b>memory-latency-bound</b>. The regime depends on <em>locality, not the code</em> — and reporting only the cache-hot number would overstate real-world throughput by up to 9×. That's also why there's no fake "100 Mpps" from a single-flow cache here: it would "win" only on this single-flow benchmark.</p>
   </div>
 
   <h2><span class="num">05</span>What it actually does live</h2>
@@ -246,14 +249,14 @@
   function hideTip() { tt.style.opacity = "0"; }
 
   // ---- journey chart ----
-  var AXIS_MAX = 108;
+  var AXIS_MAX = 100;
   var steps = [
     { label: "First working cut", note: "scratch buffer · double copy · SipHash", mpps: 19, cls: "base" },
     { label: "Single-copy, no outer UDP cksum", note: "encap_in_place · FxHashMap", mpps: 45, cls: "" },
     { label: "#[inline] + fat LTO", note: "whole-program inlining", mpps: 50, cls: "" },
     { label: "Fast flow hash", note: "parallel multiply-xor vs FNV chain", mpps: 60, cls: "" },
     { label: "Header templating", note: "precomputed prefix · 5-add checksum", mpps: 65, cls: "" },
-    { label: "Zero-copy in-place", note: "stamp into UMEM headroom · no copy", mpps: 90, cls: "peak" },
+    { label: "Zero-copy in-place", note: "stamp into UMEM headroom · no copy", mpps: 80, cls: "peak" },
   ];
   var chart = document.getElementById("chart");
   steps.forEach(function (s) {
@@ -269,20 +272,20 @@
     bar.addEventListener("mouseleave", hideTip);
   });
   var axis = document.createElement("div"); axis.className = "axis";
-  axis.innerHTML = "<span>0</span><span>the 100 Mpps line ↑ (dashed)</span><span>108 Mpps</span>";
+  axis.innerHTML = "<span>0</span><span>100 Mpps ↑ (dashed)</span><span>100</span>";
   chart.appendChild(axis);
 
-  // ---- result matrix ----
+  // ---- result matrix (mean over 7 trials) ----
   var rows = [
-    { path: "encap · copy (RX→TX)", a: 65, b: 33 },
-    { path: "encap · zero-copy (1 hot frame)", a: 90, b: 91 },
-    { path: "encap · zero-copy (batch, 64 KB)", a: 85, b: 85 },
-    { path: "decap", a: 108, b: 37, peak: true },
-    { path: "encap + SNAT (conntrack)", a: 17, b: 14 },
+    { path: "encap · copy (RX→TX)", a: 64, b: 34 },
+    { path: "encap · zero-copy (1 frame)", a: 69, b: 70 },
+    { path: "encap · zero-copy (batch)", a: 75, b: 83 },
+    { path: "decap", a: 95, b: 51, peak: true },
+    { path: "encap + SNAT (conntrack)", a: 17, b: 13 },
   ];
   var tb = document.querySelector("#matrix tbody");
   function cell(mpps, peak) {
-    var w = Math.max(6, mpps / 108 * 90);
+    var w = Math.max(6, mpps / 100 * 90);
     var ns = (1000 / mpps).toFixed(0);
     return '<td class="n' + (peak ? ' peakcell' : '') + '">' + mpps + ' Mpps <span style="color:var(--faint)">· ' + ns + ' ns</span>' +
       '<span class="mini" style="width:' + w.toFixed(0) + 'px' + (peak ? ';background:var(--accent)' : '') + '"></span></td>';
@@ -292,6 +295,55 @@
     tr.innerHTML = '<td>' + r.path + '</td>' + cell(r.a, r.peak) + cell(r.b, false);
     tb.appendChild(tr);
   });
+
+  // ---- working-set sweep line chart ----
+  // [working set KB, sequential Mpps, shuffled Mpps]
+  var sweep = [
+    [4,75,79],[8,80,78],[16,80,82],[24,73,74],[32,74,77],[48,81,78],[64,78,77],
+    [96,79,78],[128,82,81],[256,82,76],[384,78,63],[512,80,59],[768,80,56],
+    [1024,81,54],[2048,83,52],[4096,82,54],[8192,82,37],[16384,80,13],[32768,79,9.5],[65536,79,8.7]
+  ];
+  var W = 720, H = 340, PL = 46, PR = 96, PT = 18, PB = 38;
+  var pw = W - PL - PR, ph = H - PT - PB, YMAX = 90;
+  var lo = Math.log2(4), hi = Math.log2(65536);
+  function X(kb) { return PL + (Math.log2(kb) - lo) / (hi - lo) * pw; }
+  function Y(m) { return PT + (1 - m / YMAX) * ph; }
+  function poly(idx) { return sweep.map(function (d) { return X(d[0]).toFixed(1) + "," + Y(d[idx]).toFixed(1); }).join(" "); }
+  var svg = [];
+  svg.push('<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;font-family:\'IBM Plex Mono\',monospace" role="img">');
+  // y gridlines + labels
+  [0,20,40,60,80].forEach(function (v) {
+    var y = Y(v);
+    svg.push('<line x1="' + PL + '" y1="' + y + '" x2="' + (W-PR) + '" y2="' + y + '" stroke="var(--line)" stroke-width="1"/>');
+    svg.push('<text x="' + (PL-8) + '" y="' + (y+4) + '" text-anchor="end" font-size="11" fill="var(--faint)">' + v + '</text>');
+  });
+  svg.push('<text x="' + PL + '" y="' + (PT-4) + '" font-size="11" fill="var(--faint)">Mpps</text>');
+  // cache boundary markers
+  [[32,"L1 32KB"],[512,"L2 512KB"],[32768,"L3 32MB"]].forEach(function (c) {
+    var x = X(c[0]);
+    svg.push('<line x1="' + x.toFixed(1) + '" y1="' + PT + '" x2="' + x.toFixed(1) + '" y2="' + (PT+ph) + '" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="3 4"/>');
+    svg.push('<text x="' + (x+4).toFixed(1) + '" y="' + (PT+11) + '" font-size="10" fill="var(--faint)">' + c[1] + '</text>');
+  });
+  // x labels
+  [[4,"4KB"],[64,"64KB"],[1024,"1MB"],[16384,"16MB"],[65536,"64MB"]].forEach(function (c) {
+    svg.push('<text x="' + X(c[0]).toFixed(1) + '" y="' + (H-14) + '" text-anchor="middle" font-size="11" fill="var(--faint)">' + c[1] + '</text>');
+  });
+  svg.push('<text x="' + (PL+pw/2) + '" y="' + (H-1) + '" text-anchor="middle" font-size="10.5" fill="var(--faint)">resident working set (log scale)</text>');
+  // lines
+  svg.push('<polyline points="' + poly(1) + '" fill="none" stroke="var(--accent)" stroke-width="2.5"/>');
+  svg.push('<polyline points="' + poly(2) + '" fill="none" stroke="var(--l-oip)" stroke-width="2.5"/>');
+  // points
+  sweep.forEach(function (d) {
+    svg.push('<circle cx="' + X(d[0]).toFixed(1) + '" cy="' + Y(d[1]).toFixed(1) + '" r="3" fill="var(--accent)"/>');
+    svg.push('<circle cx="' + X(d[0]).toFixed(1) + '" cy="' + Y(d[2]).toFixed(1) + '" r="3" fill="var(--l-oip)"/>');
+  });
+  // direct labels at right
+  svg.push('<text x="' + (W-PR+8) + '" y="' + (Y(79)+4) + '" font-size="12" font-weight="600" fill="var(--accent)">sequential</text>');
+  svg.push('<text x="' + (W-PR+8) + '" y="' + (Y(79)+19) + '" font-size="10.5" fill="var(--faint)">~80 (flat)</text>');
+  svg.push('<text x="' + (W-PR+8) + '" y="' + (Y(8.7)+4) + '" font-size="12" font-weight="600" fill="var(--l-oip)">shuffled</text>');
+  svg.push('<text x="' + (W-PR+8) + '" y="' + (Y(8.7)+19) + '" font-size="10.5" fill="var(--faint)">~9 (DRAM)</text>');
+  svg.push('</svg>');
+  document.getElementById("sweep").innerHTML = svg.join("");
 })();
 </script>
 </body>
