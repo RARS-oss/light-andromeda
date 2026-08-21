@@ -123,12 +123,12 @@ crates/
 
 ## Try the interactive playground
 
-**[`https://rars-oss.github.io/light-andromeda/playground.html`](https://rars-oss.github.io/light-andromeda/playground.html)** — build a tenant packet in your
+**[▶ Open the packet playground](https://rars-oss.github.io/light-andromeda/playground.html)** — build a tenant packet in your
 browser and watch it get wrapped in the overlay: a color-linked layer stack and hex
 dump (hover a layer to light up its bytes), live checksums, and the flow hash. Its
 JavaScript byte-assembly is **verified to produce packets that `andromeda inspect`
 decodes byte-for-byte identically** — two independent implementations agreeing on the
-wire format. *(Open it locally, or enable GitHub Pages to host it.)*
+wire format.
 
 ## Build & run everything
 
