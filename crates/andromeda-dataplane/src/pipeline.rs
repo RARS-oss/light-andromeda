@@ -73,6 +73,15 @@ pub struct PipelineStats {
     pub passed: u64,
 }
 
+/// One frame inside a shared buffer (an AF_XDP UMEM holds many). The inner frame
+/// occupies `buf[offset + OVERLAY_OVERHEAD .. offset + OVERLAY_OVERHEAD + inner_len]`,
+/// leaving the first `OVERLAY_OVERHEAD` bytes as headroom for the overlay header.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameSlot {
+    pub offset: usize,
+    pub inner_len: usize,
+}
+
 /// Precomputed constant outer header (Ethernet + IPv4 + UDP) for the fast encap
 /// path — everything that does not change per packet, baked once from the config so
 /// forwarding only patches the variable fields.
@@ -317,6 +326,75 @@ impl Pipeline {
         self.stamp_outer(frame, inner_len, dst_node, flow, ip_id);
         self.stats.encapped += 1;
         Decision::Forward(end)
+    }
+
+    /// Batched zero-copy encap over many frames packed in one buffer. Equivalent to
+    /// calling [`Pipeline::on_tenant_frame_inplace`] per slot, but hoists the IPv4-id
+    /// and stat counters into locals so the inner loop carries no per-packet memory
+    /// dependency, and gives the compiler a tight, branch-predictable loop to pipeline
+    /// across independent frames. Returns the number of frames encapsulated.
+    pub fn encap_batch_inplace(&mut self, buf: &mut [u8], slots: &[FrameSlot], now: u64) -> usize {
+        let ioff = overlay::OVERLAY_OVERHEAD;
+        let mut ip_id = self.ip_id;
+        let mut forwarded = 0u64;
+        let mut natted = 0u64;
+
+        for s in slots {
+            let end = s.offset + ioff + s.inner_len;
+            if buf.len() < end {
+                continue;
+            }
+            let frame = &mut buf[s.offset..end];
+
+            let (inner_dst, mut flow) = {
+                let eth = match EthFrame::parse(&frame[ioff..]) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if eth.ethertype() != ethernet::ethertype::IPV4 {
+                    continue;
+                }
+                match Ipv4View::parse(eth.payload()) {
+                    Ok(ip) => (ip.dst(), flow_hash_of(&ip)),
+                    Err(_) => continue,
+                }
+            };
+
+            let (dst_node, new_dst_mac, do_snat) =
+                match self.fabric.resolve(self.cfg.vni, inner_dst) {
+                    Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
+                    None => match self.cfg.gateway_node_ip {
+                        Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
+                        None => continue,
+                    },
+                };
+
+            if let Some(m) = new_dst_mac {
+                frame[ioff..ioff + 6].copy_from_slice(&m.0);
+            }
+            if do_snat {
+                let ip_off = ioff + ethernet::ETH_HDR_LEN;
+                if let Some(t) = five_tuple_of(&frame[ip_off..]) {
+                    let rw = self.nat.process(t, Direction::Outbound, now);
+                    if !rw.is_noop() {
+                        let _ = nat_apply(&mut frame[ip_off..], &rw);
+                        natted += 1;
+                    }
+                }
+                if let Ok(ip2) = Ipv4View::parse(&frame[ip_off..]) {
+                    flow = flow_hash_of(&ip2);
+                }
+            }
+
+            ip_id = ip_id.wrapping_add(1);
+            self.stamp_outer(frame, s.inner_len, dst_node, flow, ip_id);
+            forwarded += 1;
+        }
+
+        self.ip_id = ip_id;
+        self.stats.encapped += forwarded;
+        self.stats.natted += natted;
+        forwarded as usize
     }
 
     /// Fast encap: copy the precomputed 42-byte Ethernet+IPv4+UDP header prefix,

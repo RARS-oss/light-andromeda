@@ -10,4 +10,4 @@ pub mod pipeline;
 #[cfg(feature = "afxdp")]
 pub mod afxdp;
 
-pub use pipeline::{Decision, Pipeline, PipelineConfig};
+pub use pipeline::{Decision, FrameSlot, Pipeline, PipelineConfig};

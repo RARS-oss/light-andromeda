@@ -308,57 +308,155 @@ fn decode_frame(bytes: &[u8], depth: usize) {
 
 /// Micro-benchmark the forwarding core (no sockets): how fast can one core parse,
 /// (optionally) SNAT, and Andromeda-encapsulate a packet? Pure logic, no root.
-fn bench_cmd(args: &[String]) {
-    use andromeda_dataplane::Decision;
+struct BenchRow {
+    path: &'static str,
+    frame_bytes: usize,
+    ns_per: f64,
+}
 
+fn bench_cmd(args: &[String]) {
+    use andromeda_core::overlay::OVERLAY_OVERHEAD;
+    use andromeda_dataplane::{Decision, FrameSlot};
+
+    let json = args.iter().any(|a| a == "--json");
     let iters: u64 = args
-        .first()
+        .iter()
+        .find(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|s| s.parse().ok())
-        .unwrap_or(5_000_000);
+        .unwrap_or(20_000_000);
+
+    let mut rows: Vec<BenchRow> = Vec::new();
 
     for &payload_len in &[18usize, 1354usize] {
         // 18 -> ~64B inner frame; 1354 -> ~1400B inner frame.
         let frame = udp_tenant_frame("10.0.0.10", "10.0.0.20", 40000, 4242, payload_len);
         let inner_len = frame.len();
+        let ioff = OVERLAY_OVERHEAD;
 
-        // east-west encap: destination is a known endpoint (no NAT).
+        let mut push = |path: &'static str, ns_total: u64, n: u64| {
+            rows.push(BenchRow {
+                path,
+                frame_bytes: inner_len,
+                ns_per: ns_total as f64 / n as f64,
+            });
+        };
+
+        // Copy path (separate RX/TX buffers), east-west and egress+SNAT.
         let mut ew = build_pipeline(true, false);
-        // egress + SNAT: destination outside the VPC, gateway + nat configured.
         let mut nat = build_pipeline(false, true);
-
         let mut out = vec![0u8; 2048];
+        push(
+            "encap copy (east-west)",
+            time_loop(iters, || {
+                matches!(
+                    ew.on_tenant_frame(&frame, &mut out, 0),
+                    Decision::Forward(_)
+                )
+            }),
+            iters,
+        );
+        push(
+            "encap copy + SNAT",
+            time_loop(iters, || {
+                matches!(
+                    nat.on_tenant_frame(&frame, &mut out, 0),
+                    Decision::Forward(_)
+                )
+            }),
+            iters,
+        );
 
-        let ew_ns = time_loop(iters, || {
-            matches!(
-                ew.on_tenant_frame(&frame, &mut out, 0),
-                Decision::Forward(_)
-            )
-        });
-        let nat_ns = time_loop(iters, || {
-            matches!(
-                nat.on_tenant_frame(&frame, &mut out, 0),
-                Decision::Forward(_)
-            )
-        });
-
-        // Zero-copy: the inner frame is already in the buffer at the overlay offset
-        // (as it would be in an AF_XDP UMEM frame with reserved headroom); encap only
-        // stamps the header — no payload copy.
-        let ioff = andromeda_core::overlay::OVERLAY_OVERHEAD;
+        // Zero-copy, single L1-hot frame (optimistic upper bound).
+        let mut ewz = build_pipeline(true, false);
         let mut zc = vec![0u8; 2048];
         zc[ioff..ioff + inner_len].copy_from_slice(&frame);
-        let mut ewz = build_pipeline(true, false);
-        let zc_ns = time_loop(iters, || {
-            matches!(
-                ewz.on_tenant_frame_inplace(&mut zc, inner_len, 0),
-                Decision::Forward(_)
-            )
-        });
+        push(
+            "encap zero-copy (1 hot frame)",
+            time_loop(iters, || {
+                matches!(
+                    ewz.on_tenant_frame_inplace(&mut zc, inner_len, 0),
+                    Decision::Forward(_)
+                )
+            }),
+            iters,
+        );
 
-        println!("\ninner frame = {inner_len} bytes  ({iters} iterations)");
-        report("encap (east-west, copy)", ew_ns, iters, inner_len);
-        report("encap zero-copy (in-place)", zc_ns, iters, inner_len);
-        report("encap + SNAT (egress)", nat_ns, iters, inner_len);
+        // Zero-copy batch over a 64 KB working set (realistic locality).
+        const BATCH: usize = 32;
+        const STRIDE: usize = 2048;
+        let mut ewb = build_pipeline(true, false);
+        let mut umem = vec![0u8; BATCH * STRIDE];
+        let slots: Vec<FrameSlot> = (0..BATCH)
+            .map(|i| {
+                let off = i * STRIDE;
+                umem[off + ioff..off + ioff + inner_len].copy_from_slice(&frame);
+                FrameSlot {
+                    offset: off,
+                    inner_len,
+                }
+            })
+            .collect();
+        let bi = iters / BATCH as u64;
+        push(
+            "encap zero-copy (batch, 64KB)",
+            time_loop(bi, || {
+                ewb.encap_batch_inplace(&mut umem, &slots, 0) == BATCH
+            }),
+            bi * BATCH as u64,
+        );
+
+        // Decap (underlay -> tenant).
+        let mut dz = build_pipeline(true, false);
+        let mut wire = vec![0u8; 2048];
+        let n = match dz.on_tenant_frame(&frame, &mut wire, 0) {
+            Decision::Forward(n) => n,
+            _ => 0,
+        };
+        let encapped: Vec<u8> = wire[..n].to_vec();
+        let mut dd = build_pipeline(true, false);
+        let mut dout = vec![0u8; 2048];
+        push(
+            "decap (underlay->tenant)",
+            time_loop(iters, || {
+                matches!(
+                    dd.on_underlay_frame(&encapped, &mut dout, 0),
+                    Decision::Forward(_)
+                )
+            }),
+            iters,
+        );
+    }
+
+    if json {
+        print!("[");
+        for (i, r) in rows.iter().enumerate() {
+            let mpps = 1000.0 / r.ns_per;
+            let gbps = mpps * 1e6 * (r.frame_bytes as f64 + 50.0) * 8.0 / 1e9;
+            print!(
+                "{}{{\"path\":\"{}\",\"frame_bytes\":{},\"ns_per_pkt\":{:.2},\"mpps\":{:.2},\"gbit_s_wire\":{:.1}}}",
+                if i == 0 { "" } else { "," },
+                r.path,
+                r.frame_bytes,
+                r.ns_per,
+                mpps,
+                gbps
+            );
+        }
+        println!("]");
+    } else {
+        let mut last = 0usize;
+        for r in &rows {
+            if r.frame_bytes != last {
+                println!("\ninner frame = {} bytes", r.frame_bytes);
+                last = r.frame_bytes;
+            }
+            let mpps = 1000.0 / r.ns_per;
+            let gbps = mpps * 1e6 * (r.frame_bytes as f64 + 50.0) * 8.0 / 1e9;
+            println!(
+                "  {:<30} {:6.1} ns/pkt   {:6.2} Mpps   {:7.1} Gbit/s (wire)",
+                r.path, r.ns_per, mpps, gbps
+            );
+        }
     }
 }
 
@@ -374,15 +472,6 @@ fn time_loop<F: FnMut() -> bool>(iters: u64, mut f: F) -> u64 {
     // Guard against the optimizer eliding the loop.
     std::hint::black_box(ok);
     t0.elapsed().as_nanos() as u64
-}
-
-fn report(label: &str, total_ns: u64, iters: u64, inner_len: usize) {
-    let ns_per = total_ns as f64 / iters as f64;
-    let mpps = 1000.0 / ns_per; // 1e9/ns_per packets/s, expressed in Mpps
-                                // Throughput of the encapsulated wire bytes.
-    let wire = inner_len as f64 + 50.0; // overlay overhead
-    let gbps = mpps * 1e6 * wire * 8.0 / 1e9;
-    println!("  {label:<24} {ns_per:6.1} ns/pkt   {mpps:6.2} Mpps   {gbps:6.2} Gbit/s (wire)");
 }
 
 fn build_pipeline(east_west: bool, snat: bool) -> Pipeline {
