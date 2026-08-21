@@ -115,11 +115,15 @@ Each crate is small and single-purpose, and the two hardest, most reusable piece
       (`--mode dump|encap|decap`)
 - [x] veth/netns demo script proving bypass + capturing the overlay on the wire
 
+- [x] **Two-interface switch** (`andromeda switch --tenant <if> --underlay <if>`):
+      full tenant→encap→underlay→decap→tenant path — a **real ping travels through
+      the overlay** across two independent user-space switches
+- [x] Two-node veth/netns demo script
+
 **In progress:**
 
-- [ ] Two-interface switch: `run --tenant <if> --underlay <if>` for a full
-      tenant→encap→underlay→decap→tenant path (real ping *through* the overlay)
 - [ ] Declarative fabric config (endpoints/routes from a file)
+- [ ] ARP responder on the tenant port (today the demo uses static neighbours)
 - [ ] Latency & throughput benchmarks vs. the kernel path
 
 ## Seeing it work
@@ -145,6 +149,20 @@ IP 192.168.1.1.49152 > 192.168.1.2.43481:  (outer IPv4 + UDP to the Andromeda po
                                  ^^^^ Andromeda: ver=1  ^^^^^^ VNI=0x64=100, hop=64
   0x0024:  0a71 0388 a35b 16b4 786a d3fc 0800 4500   inner Ethernet frame ...
   0x0034:  0054 ...      4001 ... 0a0a 0002 0a0a 0001   inner IPv4 10.10.0.2 -> 10.10.0.1 (ICMP)
+```
+
+`sudo ./scripts/demo-2node.sh` builds two nodes and pings **through** the overlay —
+tenant 10.0.0.10 reaches tenant 10.0.0.20 across two separate user-space switches,
+each encapsulating one direction and decapsulating the other:
+
+```
+PING 10.0.0.20 (10.0.0.20) 56(84) bytes of data.
+64 bytes from 10.0.0.20: icmp_seq=1 ttl=64 time=0.413 ms
+64 bytes from 10.0.0.20: icmp_seq=2 ttl=64 time=0.243 ms
+--- 10.0.0.20 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss
+                                                 # node 1: encapped 4, decapped 4
+                                                 # node 2: encapped 4, decapped 4
 ```
 
 ---

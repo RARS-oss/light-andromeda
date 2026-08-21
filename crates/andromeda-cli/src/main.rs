@@ -15,6 +15,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("selftest") => selftest(),
         Some("run") => run_cmd(&args[2..]),
+        Some("switch") => switch_cmd(&args[2..]),
         Some("version") | Some("--version") | None => print_version(),
         Some("help") | Some("--help") | Some("-h") => print_help(),
         Some(other) => {
@@ -217,6 +218,107 @@ fn run_cmd(args: &[String]) {
         }
         Err(e) => {
             eprintln!("run error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---- switch subcommand (two-interface node) -------------------------------
+
+#[cfg(not(feature = "afxdp"))]
+fn switch_cmd(_args: &[String]) {
+    eprintln!(
+        "the `switch` subcommand needs the AF_XDP datapath.\n\
+         rebuild with:  cargo build --release -p andromeda-cli --features afxdp"
+    );
+    std::process::exit(1);
+}
+
+#[cfg(feature = "afxdp")]
+fn switch_cmd(args: &[String]) {
+    use andromeda_dataplane::afxdp::{self, Mode, RunOpts, XdpMode, XskConfig, XskSocket};
+
+    let mut tenant_if: Option<String> = None;
+    let mut underlay_if: Option<String> = None;
+    let mut vni: u32 = 100;
+    let mut local_node: Ipv4Addr = "192.168.1.1".parse().unwrap();
+    let mut peer_node: Ipv4Addr = "192.168.1.2".parse().unwrap();
+    let mut nat_ip: Option<Ipv4Addr> = None;
+    let mut max_secs: Option<u64> = None;
+    let mut batch: u32 = 64;
+    let mut xdp_mode = XdpMode::Auto;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--tenant" => tenant_if = Some(next_str(&mut it, "--tenant")),
+            "--underlay" => underlay_if = Some(next_str(&mut it, "--underlay")),
+            "--vni" => vni = next_parse(&mut it, "--vni"),
+            "--local-node" => local_node = next_parse(&mut it, "--local-node"),
+            "--peer-node" => peer_node = next_parse(&mut it, "--peer-node"),
+            "--nat-ip" => nat_ip = Some(next_parse(&mut it, "--nat-ip")),
+            "--secs" => max_secs = Some(next_parse(&mut it, "--secs")),
+            "--batch" => batch = next_parse(&mut it, "--batch"),
+            "--skb" => xdp_mode = XdpMode::Skb,
+            "--drv" => xdp_mode = XdpMode::Drv,
+            other => {
+                eprintln!("unknown option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let (Some(tif), Some(uif)) = (tenant_if, underlay_if) else {
+        eprintln!("usage: andromeda switch --tenant <if> --underlay <if> [--vni N --local-node IP --peer-node IP ...]");
+        std::process::exit(2);
+    };
+
+    // Node fabric: encapsulate any inner IPv4 toward the peer node; decapsulate
+    // matching-VNI overlay traffic and deliver it on the tenant port.
+    let mut fabric = Fabric::new(local_node);
+    fabric.add_vpc(Vpc { vni, name: format!("vpc-{vni}"), cidr: ("0.0.0.0".parse().unwrap(), 0) });
+    let cfg = PipelineConfig {
+        local_node_ip: local_node,
+        outer_src_mac: MacAddr([0x02, 0, 0, 0, 0xa1, 0x01]),
+        outer_dst_mac: MacAddr([0x02, 0, 0, 0, 0xa1, 0x02]),
+        vni,
+        nat_ip,
+        gateway_node_ip: Some(peer_node),
+    };
+    let nat = NatEngine::new(nat_ip.unwrap_or(local_node), 20000, 60000);
+    let mut pipeline = Pipeline::new(cfg, fabric, nat);
+
+    let xcfg = XskConfig { xdp_mode, ..Default::default() };
+    println!("switch: tenant={tif} underlay={uif} vni={vni} local={local_node} peer={peer_node}");
+    let mut tenant = match XskSocket::open(&tif, 0, &xcfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("open tenant {tif}: {e} (need root; try --skb)");
+            std::process::exit(1);
+        }
+    };
+    let mut underlay = match XskSocket::open(&uif, 0, &xcfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("open underlay {uif}: {e} (need root; try --skb)");
+            std::process::exit(1);
+        }
+    };
+    println!("bound both ports. Ctrl-C to stop.");
+
+    afxdp::install_sigint_handler();
+    let opts = RunOpts { mode: Mode::Encap, max_packets: None, max_secs, batch };
+    match afxdp::run_switch(&mut tenant, &mut underlay, &mut pipeline, opts) {
+        Ok(stats) => {
+            println!("\n--- done ---");
+            println!(
+                "rx={} tx={} decapped={} dropped={} bytes_in={}",
+                stats.rx, stats.tx, stats.decapped, stats.dropped, stats.bytes_in
+            );
+            println!("pipeline: {:?}", pipeline.stats());
+        }
+        Err(e) => {
+            eprintln!("switch error: {e}");
             std::process::exit(1);
         }
     }

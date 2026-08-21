@@ -368,6 +368,118 @@ pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::
     Ok(stats)
 }
 
+/// Run a full two-interface switch: encapsulate frames arriving on the tenant
+/// port and transmit them on the underlay port; decapsulate frames arriving on the
+/// underlay port and deliver them on the tenant port. This is the real datapath a
+/// node runs — a bidirectional overlay bridge in user space.
+///
+/// Because the two ports have independent UMEMs, forwarding copies the built packet
+/// into a destination-port frame (a shared-UMEM zero-copy path is a later
+/// optimization). Both directions run every iteration; a single `poll` waits on
+/// both sockets.
+pub fn run_switch(
+    tenant: &mut XskSocket,
+    underlay: &mut XskSocket,
+    pipeline: &mut Pipeline,
+    opts: RunOpts,
+) -> io::Result<RunStats> {
+    let batch = opts.batch.max(1);
+    let mut addrs = vec![0u64; batch as usize];
+    let mut lens = vec![0u32; batch as usize];
+    let mut stats = RunStats::default();
+    let start = Instant::now();
+
+    loop {
+        if STOP.load(Ordering::SeqCst) {
+            break;
+        }
+        if let Some(m) = opts.max_packets {
+            if stats.rx >= m {
+                break;
+            }
+        }
+        if let Some(s) = opts.max_secs {
+            if start.elapsed().as_secs() >= s {
+                break;
+            }
+        }
+
+        // Wait on both sockets at once.
+        let mut pfds = [
+            libc::pollfd { fd: tenant.fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: underlay.fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        let pr = unsafe { libc::poll(pfds.as_mut_ptr(), 2, 200) };
+        let now_ms = start.elapsed().as_millis() as u64;
+
+        // Tenant -> underlay (encapsulate).
+        if pr > 0 && (pfds[0].revents & libc::POLLIN) != 0 {
+            let n = tenant.rx_burst(&mut addrs, &mut lens);
+            for i in 0..n {
+                let (addr, len) = (addrs[i], lens[i]);
+                stats.rx += 1;
+                stats.bytes_in += len as u64;
+                if let Some(tx_addr) = underlay.alloc_tx() {
+                    let decision = {
+                        let inner = tenant.frame(addr, len);
+                        let out = underlay.frame_mut(tx_addr);
+                        pipeline.on_tenant_frame(inner, out, now_ms)
+                    };
+                    match decision {
+                        Decision::Forward(m) if underlay.tx_one(tx_addr, m as u32) => stats.tx += 1,
+                        _ => {
+                            underlay.recycle(tx_addr);
+                            stats.dropped += 1;
+                        }
+                    }
+                } else {
+                    stats.dropped += 1;
+                }
+                tenant.recycle(addr);
+            }
+        }
+
+        // Underlay -> tenant (decapsulate + deliver).
+        if pr > 0 && (pfds[1].revents & libc::POLLIN) != 0 {
+            let n = underlay.rx_burst(&mut addrs, &mut lens);
+            for i in 0..n {
+                let (addr, len) = (addrs[i], lens[i]);
+                stats.rx += 1;
+                stats.bytes_in += len as u64;
+                if let Some(tx_addr) = tenant.alloc_tx() {
+                    let decision = {
+                        let frame = underlay.frame(addr, len);
+                        let out = tenant.frame_mut(tx_addr);
+                        pipeline.on_underlay_frame(frame, out, now_ms)
+                    };
+                    match decision {
+                        Decision::Forward(m) if tenant.tx_one(tx_addr, m as u32) => {
+                            stats.tx += 1;
+                            stats.decapped += 1;
+                        }
+                        _ => {
+                            tenant.recycle(tx_addr);
+                            stats.dropped += 1;
+                        }
+                    }
+                } else {
+                    stats.dropped += 1;
+                }
+                underlay.recycle(addr);
+            }
+        }
+
+        underlay.kick_tx_if_needed();
+        tenant.kick_tx_if_needed();
+        underlay.complete_tx(batch);
+        tenant.complete_tx(batch);
+        underlay.refill(batch);
+        tenant.refill(batch);
+    }
+
+    Ok(stats)
+}
+
 /// Print a one-line summary of a frame (used by dump/decap modes).
 fn print_frame(frame: &[u8], seq: u64) {
     match EthFrame::parse(frame) {
