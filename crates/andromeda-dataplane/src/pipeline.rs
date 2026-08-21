@@ -176,6 +176,14 @@ impl Pipeline {
         &self.cfg
     }
 
+    /// Evict NAT bindings (conntrack + SNAT port pool) idle longer than
+    /// `idle_timeout` (same time unit as the `now` passed to the frame handlers).
+    /// The forwarding loop must call this periodically, or the port pool and
+    /// conntrack tables never reclaim. Returns the number of SNAT ports freed.
+    pub fn gc(&mut self, now: u64, idle_timeout: u64) -> usize {
+        self.nat.gc(now, idle_timeout)
+    }
+
     fn next_ip_id(&mut self) -> u16 {
         self.ip_id = self.ip_id.wrapping_add(1);
         self.ip_id

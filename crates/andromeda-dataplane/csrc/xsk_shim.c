@@ -126,13 +126,15 @@ uint32_t andro_rx_peek(struct andro_xsk *x, uint64_t *addrs, uint32_t *lens, uin
         const struct xdp_desc *d = xsk_ring_cons__rx_desc(&x->rx, idx + i);
         uint64_t a = d->addr;
         uint32_t l = d->len;
-        // Defense-in-depth: never let a descriptor address/length escape the UMEM.
-        // Under XDP_COPY the kernel already bounds these, but a native/multi-buffer
-        // driver could deliver a larger len; clamping keeps the Rust slice inside the
-        // frame slot (no OOB read, no aliasing with a TX frame).
+        // Defense-in-depth: never let a descriptor address/length escape its frame
+        // slot. Under XDP_COPY the kernel already bounds these, but a native/multi-
+        // buffer driver could deliver a larger len or an unaligned addr; clamping to
+        // the room left in THIS slot keeps the Rust slice inside one frame (no OOB
+        // read, no crossing into the next slot, no aliasing with a TX frame). Since
+        // frame_size divides area_sz, a slot never crosses the UMEM boundary either.
         if (a >= area_sz) { a = 0; l = 0; }
-        if (l > x->frame_size) l = x->frame_size;
-        if (a + l > area_sz) l = (uint32_t)(area_sz - a);
+        uint32_t slot_room = x->frame_size - (uint32_t)(a % x->frame_size);
+        if (l > slot_room) l = slot_room;
         addrs[i] = a;
         lens[i] = l;
     }

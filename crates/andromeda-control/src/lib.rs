@@ -34,7 +34,12 @@ impl Vpc {
         if len == 0 {
             return true;
         }
-        let mask = u32::MAX.checked_shl(32 - len as u32).unwrap_or(0);
+        // Prefixes are validated to <= 32 at config load; guard anyway so a stray
+        // value can't underflow `32 - len` (wrap in release, panic in debug).
+        if len >= 32 {
+            return u32::from(ip) == u32::from(net);
+        }
+        let mask = u32::MAX << (32 - u32::from(len));
         (u32::from(ip) & mask) == (u32::from(net) & mask)
     }
 }

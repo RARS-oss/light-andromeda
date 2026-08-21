@@ -292,6 +292,12 @@ pub fn install_sigint_handler() {
     }
 }
 
+/// Evict NAT bindings idle longer than this (ms). Conntrack-style idle timeout;
+/// without periodic eviction the SNAT port pool and conntrack tables never reclaim.
+const NAT_IDLE_TIMEOUT_MS: u64 = 120_000;
+/// How often the forwarding loops run NAT garbage collection.
+const NAT_GC_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Run the forwarding loop until Ctrl-C, packet cap, or time cap.
 pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::Result<RunStats> {
     let batch = opts.batch.max(1);
@@ -299,6 +305,7 @@ pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::
     let mut lens = vec![0u32; batch as usize];
     let mut stats = RunStats::default();
     let start = Instant::now();
+    let mut gc_at = Instant::now();
 
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -313,6 +320,12 @@ pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::
             if start.elapsed().as_secs() >= s {
                 break;
             }
+        }
+
+        // Periodically reclaim idle NAT bindings (port pool + conntrack).
+        if gc_at.elapsed() >= NAT_GC_INTERVAL {
+            pipeline.gc(start.elapsed().as_millis() as u64, NAT_IDLE_TIMEOUT_MS);
+            gc_at = Instant::now();
         }
 
         let pr = sock.poll_rx(200);
@@ -432,6 +445,8 @@ pub fn run_switch(
         // Live stats line, once a second — interesting to watch under load.
         let since = report_at.elapsed();
         if since >= Duration::from_secs(1) {
+            // Reclaim idle NAT bindings (port pool + conntrack) on the same tick.
+            pipeline.gc(start.elapsed().as_millis() as u64, NAT_IDLE_TIMEOUT_MS);
             let dt = since.as_secs_f64();
             let ps = pipeline.stats();
             println!(
