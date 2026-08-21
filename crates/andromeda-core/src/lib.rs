@@ -15,6 +15,7 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
+pub mod arp;
 pub mod checksum;
 pub mod ethernet;
 pub mod ipv4;
@@ -26,7 +27,11 @@ pub mod udp;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// Buffer shorter than the minimum header size.
-    TooShort { what: &'static str, need: usize, got: usize },
+    TooShort {
+        what: &'static str,
+        need: usize,
+        got: usize,
+    },
     /// Version nibble did not match the expected protocol version.
     BadVersion { what: &'static str, version: u8 },
     /// A declared header length was nonsensical (too small or past the buffer).
@@ -110,7 +115,13 @@ pub fn five_tuple_of(ipv4_packet: &[u8]) -> Option<FiveTuple> {
         }
         _ => return None,
     };
-    Some(FiveTuple { src_ip: ip.src(), dst_ip: ip.dst(), protocol: proto, src_port, dst_port })
+    Some(FiveTuple {
+        src_ip: ip.src(),
+        dst_ip: ip.dst(),
+        protocol: proto,
+        src_port,
+        dst_port,
+    })
 }
 
 #[cfg(test)]

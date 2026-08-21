@@ -42,6 +42,39 @@ impl fmt::Debug for MacAddr {
     }
 }
 
+impl core::str::FromStr for MacAddr {
+    type Err = MacParseError;
+
+    /// Parse `aa:bb:cc:dd:ee:ff` (colon- or dash-separated hex octets).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut octets = [0u8; 6];
+        let mut n = 0;
+        for part in s.split([':', '-']) {
+            if n == 6 {
+                return Err(MacParseError);
+            }
+            octets[n] = u8::from_str_radix(part, 16).map_err(|_| MacParseError)?;
+            n += 1;
+        }
+        if n != 6 {
+            return Err(MacParseError);
+        }
+        Ok(MacAddr(octets))
+    }
+}
+
+/// Error returned when a MAC address string is malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MacParseError;
+
+impl fmt::Display for MacParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid MAC address (expected aa:bb:cc:dd:ee:ff)")
+    }
+}
+
+impl std::error::Error for MacParseError {}
+
 impl fmt::Display for MacAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b = self.0;
@@ -179,16 +212,39 @@ mod tests {
 
     #[test]
     fn mac_display_and_flags() {
-        assert_eq!(MacAddr([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]).to_string(), "02:aa:bb:cc:dd:ee");
+        assert_eq!(
+            MacAddr([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]).to_string(),
+            "02:aa:bb:cc:dd:ee"
+        );
         assert!(MacAddr::BROADCAST.is_broadcast());
         assert!(MacAddr::BROADCAST.is_multicast());
         assert!(!MacAddr([0x02, 0, 0, 0, 0, 1]).is_multicast());
     }
 
     #[test]
+    fn mac_from_str() {
+        assert_eq!(
+            "02:aa:bb:cc:dd:ee".parse::<MacAddr>().unwrap(),
+            MacAddr([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+        );
+        assert_eq!(
+            "02-00-00-00-00-01".parse::<MacAddr>().unwrap(),
+            MacAddr([0x02, 0, 0, 0, 0, 1])
+        );
+        assert!("02:aa:bb".parse::<MacAddr>().is_err());
+        assert!("zz:aa:bb:cc:dd:ee".parse::<MacAddr>().is_err());
+        assert!("02:aa:bb:cc:dd:ee:ff".parse::<MacAddr>().is_err());
+    }
+
+    #[test]
     fn write_roundtrip() {
         let mut buf = [0u8; 14];
-        write_header(&mut buf, MacAddr::BROADCAST, MacAddr([2, 0, 0, 0, 0, 1]), ethertype::ARP);
+        write_header(
+            &mut buf,
+            MacAddr::BROADCAST,
+            MacAddr([2, 0, 0, 0, 0, 1]),
+            ethertype::ARP,
+        );
         let f = EthFrame::parse(&buf).unwrap();
         assert_eq!(f.dst(), MacAddr::BROADCAST);
         assert_eq!(f.ethertype(), ethertype::ARP);

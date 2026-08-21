@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install AF_XDP build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxdp-dev libbpf-dev libelf-dev zlib1g-dev clang m4 pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (portable build)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy (AF_XDP build)
+        run: cargo clippy -p andromeda-cli --features afxdp --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the AF_XDP datapath
+        run: cargo build --release -p andromeda-cli --features afxdp

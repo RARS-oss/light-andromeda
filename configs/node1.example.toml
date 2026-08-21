@@ -1,0 +1,25 @@
+# Example fabric config for node 1 (underlay 192.168.1.1).
+#
+# Load it with:  andromeda switch --tenant <if> --underlay <if> --config node1.example.toml
+#
+# The endpoint MACs below are placeholders — in the two-node demo,
+# scripts/demo-2node.sh generates configs with the veths' real MACs. For a real
+# deployment, fill in each endpoint's actual NIC MAC.
+
+local_node          = "192.168.1.1"   # this switch's underlay address
+peer_node           = "192.168.1.2"   # default route for unknown destinations
+vni                 = 100              # the VPC this switch serves
+virtual_gateway_mac = "02:00:00:00:00:ff"   # MAC the switch answers tenant ARP with
+vpc_cidr            = "10.0.0.0/24"
+# nat_ip            = "203.0.113.7"    # uncomment to SNAT egress traffic
+
+[[endpoint]]
+inner_ip  = "10.0.0.10"
+inner_mac = "aa:bb:cc:00:00:10"
+node_ip   = "192.168.1.1"
+local     = true
+
+[[endpoint]]
+inner_ip  = "10.0.0.20"
+inner_mac = "aa:bb:cc:00:00:20"
+node_ip   = "192.168.1.2"

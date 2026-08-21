@@ -169,8 +169,14 @@ impl NatEngine {
             return Rewrite::default();
         };
 
-        self.snat_fwd
-            .insert(tuple, Binding { ip: self.nat_ip, port: nat_port, last_seen: now });
+        self.snat_fwd.insert(
+            tuple,
+            Binding {
+                ip: self.nat_ip,
+                port: nat_port,
+                last_seen: now,
+            },
+        );
 
         // Reply we expect back: from remote → nat_ip:nat_port.
         let reply = FiveTuple {
@@ -180,8 +186,14 @@ impl NatEngine {
             src_port: tuple.dst_port,
             dst_port: nat_port,
         };
-        self.snat_rev
-            .insert(reply, Binding { ip: tuple.src_ip, port: tuple.src_port, last_seen: now });
+        self.snat_rev.insert(
+            reply,
+            Binding {
+                ip: tuple.src_ip,
+                port: tuple.src_port,
+                last_seen: now,
+            },
+        );
 
         self.stats.snat_created += 1;
         Rewrite {
@@ -221,7 +233,11 @@ impl NatEngine {
                 };
                 self.dnat_rev.insert(
                     server_reply,
-                    Binding { ip: self.nat_ip, port: rule.ext_port, last_seen: now },
+                    Binding {
+                        ip: self.nat_ip,
+                        port: rule.ext_port,
+                        last_seen: now,
+                    },
                 );
                 self.stats.dnat_created += 1;
                 return Rewrite {
@@ -237,7 +253,10 @@ impl NatEngine {
 
     /// Allocate a free port, preferring to preserve `preferred` if available.
     fn alloc_port(&mut self, preferred: u16) -> Option<u16> {
-        if preferred >= self.port_min && preferred <= self.port_max && !self.used_ports.contains(&preferred) {
+        if preferred >= self.port_min
+            && preferred <= self.port_max
+            && !self.used_ports.contains(&preferred)
+        {
             self.used_ports.insert(preferred);
             return Some(preferred);
         }
@@ -290,7 +309,12 @@ pub fn apply(pkt: &mut [u8], rw: &Rewrite) -> Result<(), ParseError> {
     // Snapshot what we need before taking the mutable borrow.
     let (ihl, protocol, old_src, old_dst) = {
         let v = Ipv4View::parse(pkt)?;
-        (v.ihl_bytes(), v.protocol(), u32::from(v.src()), u32::from(v.dst()))
+        (
+            v.ihl_bytes(),
+            v.protocol(),
+            u32::from(v.src()),
+            u32::from(v.dst()),
+        )
     };
 
     // 1) Rewrite addresses in the IPv4 header (fixes the IPv4 header checksum).
@@ -411,8 +435,16 @@ mod tests {
     #[test]
     fn gc_frees_ports() {
         let mut nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20001);
-        nat.process(tuple("10.0.0.1", 1, "1.1.1.1", 80, proto::TCP), Direction::Outbound, 100);
-        nat.process(tuple("10.0.0.2", 2, "1.1.1.1", 80, proto::TCP), Direction::Outbound, 100);
+        nat.process(
+            tuple("10.0.0.1", 1, "1.1.1.1", 80, proto::TCP),
+            Direction::Outbound,
+            100,
+        );
+        nat.process(
+            tuple("10.0.0.2", 2, "1.1.1.1", 80, proto::TCP),
+            Direction::Outbound,
+            100,
+        );
         assert_eq!(nat.active_bindings(), 2);
         // Idle timeout of 50 at now=200 → both (last_seen 100) evicted.
         let evicted = nat.gc(200, 50);
@@ -433,7 +465,16 @@ mod tests {
         tcp_seg[16..18].copy_from_slice(&c.to_be_bytes());
 
         let mut pkt = vec![0u8; ipv4::IPV4_MIN_HDR_LEN + tcp_seg.len()];
-        ipv4::write_header(&mut pkt[..20], src, dst, proto::TCP, 64, 1, true, tcp_seg.len() as u16);
+        ipv4::write_header(
+            &mut pkt[..20],
+            src,
+            dst,
+            proto::TCP,
+            64,
+            1,
+            true,
+            tcp_seg.len() as u16,
+        );
         pkt[20..].copy_from_slice(&tcp_seg);
 
         // SNAT src -> 203.0.113.7:20000.
@@ -471,7 +512,16 @@ mod tests {
         udp_dg[6..8].copy_from_slice(&c.to_be_bytes());
 
         let mut pkt = vec![0u8; ipv4::IPV4_MIN_HDR_LEN + udp_dg.len()];
-        ipv4::write_header(&mut pkt[..20], src, dst, proto::UDP, 64, 1, true, udp_dg.len() as u16);
+        ipv4::write_header(
+            &mut pkt[..20],
+            src,
+            dst,
+            proto::UDP,
+            64,
+            1,
+            true,
+            udp_dg.len() as u16,
+        );
         pkt[20..].copy_from_slice(&udp_dg);
 
         // DNAT dst -> 10.0.0.9:5353.

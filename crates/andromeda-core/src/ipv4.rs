@@ -25,21 +25,34 @@ pub struct Ipv4View<'a> {
 impl<'a> Ipv4View<'a> {
     pub fn parse(buf: &'a [u8]) -> Result<Self, ParseError> {
         if buf.len() < IPV4_MIN_HDR_LEN {
-            return Err(ParseError::TooShort { what: "ipv4", need: IPV4_MIN_HDR_LEN, got: buf.len() });
+            return Err(ParseError::TooShort {
+                what: "ipv4",
+                need: IPV4_MIN_HDR_LEN,
+                got: buf.len(),
+            });
         }
         let version = buf[0] >> 4;
         if version != 4 {
-            return Err(ParseError::BadVersion { what: "ipv4", version });
+            return Err(ParseError::BadVersion {
+                what: "ipv4",
+                version,
+            });
         }
         let ihl = (buf[0] & 0x0f) as usize * 4;
         if ihl < IPV4_MIN_HDR_LEN || ihl > buf.len() {
-            return Err(ParseError::BadHeaderLen { what: "ipv4", len: ihl });
+            return Err(ParseError::BadHeaderLen {
+                what: "ipv4",
+                len: ihl,
+            });
         }
         let total = u16::from_be_bytes([buf[2], buf[3]]) as usize;
         // total_length may be larger than the captured slice for a truncated
         // capture, but it must at least cover the header.
         if total < ihl {
-            return Err(ParseError::BadHeaderLen { what: "ipv4-total", len: total });
+            return Err(ParseError::BadHeaderLen {
+                what: "ipv4-total",
+                len: total,
+            });
         }
         Ok(Self { buf })
     }
@@ -276,7 +289,10 @@ mod tests {
         }
         let v = Ipv4View::parse(&p).unwrap();
         assert_eq!(v.src(), Ipv4Addr::new(10, 0, 0, 7));
-        assert!(v.checksum_valid(), "header checksum must stay valid after SNAT");
+        assert!(
+            v.checksum_valid(),
+            "header checksum must stay valid after SNAT"
+        );
     }
 
     #[test]

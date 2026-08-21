@@ -21,12 +21,12 @@ pub fn checksum(data: &[u8]) -> u16 {
 #[must_use]
 pub fn sum_be16(data: &[u8]) -> u32 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum = sum.wrapping_add(u16::from_be_bytes([c[0], c[1]]) as u32);
+    let (pairs, rem) = data.as_chunks::<2>();
+    for &[hi, lo] in pairs {
+        sum = sum.wrapping_add(u16::from_be_bytes([hi, lo]) as u32);
     }
-    if let [last] = chunks.remainder() {
-        sum = sum.wrapping_add((u16::from_be_bytes([*last, 0])) as u32);
+    if let [last] = rem {
+        sum = sum.wrapping_add(u16::from_be_bytes([*last, 0]) as u32);
     }
     sum
 }
@@ -96,13 +96,18 @@ mod tests {
     fn checksum_verifies_to_zero() {
         // A valid checksum, when included in the summed data, makes the running
         // sum fold to 0xffff (i.e. checksum-of-the-whole == 0).
-        let mut data = vec![0x45u8, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00,
-                            0x40, 0x06, 0x00, 0x00, 0xac, 0x10, 0x0a, 0x63,
-                            0xac, 0x10, 0x0a, 0x0c];
+        let mut data = vec![
+            0x45u8, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 0xac, 0x10,
+            0x0a, 0x63, 0xac, 0x10, 0x0a, 0x0c,
+        ];
         let c = checksum(&data);
         data[10] = (c >> 8) as u8;
         data[11] = (c & 0xff) as u8;
-        assert_eq!(checksum(&data), 0, "recomputing over data incl. checksum must be 0");
+        assert_eq!(
+            checksum(&data),
+            0,
+            "recomputing over data incl. checksum must be 0"
+        );
     }
 
     #[test]
@@ -115,9 +120,10 @@ mod tests {
     fn incremental_matches_full_recompute() {
         // Build an IPv4-ish header, checksum it, mutate a 32-bit field, and show
         // the incremental update equals a from-scratch recompute.
-        let mut hdr = [0x45u8, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00,
-                       0x40, 0x06, 0x00, 0x00, 0xac, 0x10, 0x0a, 0x63,
-                       0xac, 0x10, 0x0a, 0x0c];
+        let mut hdr = [
+            0x45u8, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 0xac, 0x10,
+            0x0a, 0x63, 0xac, 0x10, 0x0a, 0x0c,
+        ];
         let c0 = checksum(&hdr);
         hdr[10] = (c0 >> 8) as u8;
         hdr[11] = (c0 & 0xff) as u8;
@@ -133,6 +139,9 @@ mod tests {
         hdr[10] = 0;
         hdr[11] = 0;
         let full = checksum(&hdr);
-        assert_eq!(incremental, full, "incremental update must equal full recompute");
+        assert_eq!(
+            incremental, full,
+            "incremental update must equal full recompute"
+        );
     }
 }

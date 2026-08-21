@@ -83,12 +83,13 @@ network stack entirely.
 ```
 light-andromeda/
 ├── crates/
-│   ├── andromeda-core/       # zero-copy L2/L3/L4 parsing + Andromeda encap + checksums
+│   ├── andromeda-core/       # zero-copy Eth/IPv4/UDP/TCP/ARP parsing + Andromeda encap + checksums
 │   ├── andromeda-nat/        # stateful SNAT/PAT + DNAT with conntrack
-│   ├── andromeda-control/    # VPC/endpoint model + overlay forwarding lookup (SDN map)
-│   ├── andromeda-dataplane/  # forwarding pipeline; AF_XDP ring loop (in progress)
-│   └── andromeda-cli/        # `andromeda` binary: run the switch, manage fabric, benchmark
-├── scripts/                  # veth/netns topology setup for the multi-node demo
+│   ├── andromeda-control/    # VPC/endpoint model, TOML fabric config, forwarding lookup (SDN map)
+│   ├── andromeda-dataplane/  # forwarding pipeline + AF_XDP ring loop (csrc/xsk_shim.c)
+│   └── andromeda-cli/        # `andromeda`: selftest / bench / inspect / run / switch
+├── configs/                  # example fabric TOML configs
+├── scripts/                  # veth/netns demos (single-node + two-node)
 └── docs/                     # architecture + design notes
 ```
 
@@ -99,7 +100,7 @@ Each crate is small and single-purpose, and the two hardest, most reusable piece
 
 ## Status
 
-**Done and tested (33 unit tests, all green):**
+**Done and tested (40 unit tests, all green; `cargo fmt` + `clippy -D warnings` clean, CI on GitHub Actions):**
 
 - [x] Byte-exact Ethernet / IPv4 / UDP / TCP parsing and building
 - [x] Internet checksum + incremental update (verified against full recompute)
@@ -120,11 +121,37 @@ Each crate is small and single-purpose, and the two hardest, most reusable piece
       the overlay** across two independent user-space switches
 - [x] Two-node veth/netns demo script
 
-**In progress:**
+- [x] **Declarative TOML fabric config** (`--config node.toml`): endpoints, VNI,
+      gateway, NAT, virtual gateway MAC
+- [x] **Proxy-ARP responder** on the tenant port — the demo needs no static
+      neighbours; the switch is the tenant's distributed gateway
+- [x] Live per-second throughput stats, an `inspect` packet decoder, and a
+      forwarding-core benchmark
 
-- [ ] Declarative fabric config (endpoints/routes from a file)
-- [ ] ARP responder on the tenant port (today the demo uses static neighbours)
-- [ ] Latency & throughput benchmarks vs. the kernel path
+**Possible next steps:**
+
+- [ ] Multi-VPC on one switch (VNI keyed by ingress port); IPv6 / ND
+- [ ] MAC learning instead of a fully-provisioned endpoint table
+- [ ] Shared-UMEM zero-copy between the two ports; native (driver) XDP throughput
+
+## Poke at it (no root, no Linux needed)
+
+```
+$ andromeda inspect          # decodes a synthesized overlay packet, layer by layer
+Ethernet  02:00:00:00:a1:01 -> 02:00:00:00:a1:02  ethertype 0x0800 (IPv4)
+  IPv4  192.168.1.1 -> 192.168.1.2  proto 17 (UDP)  ttl 64  len 90  cksum ok
+    UDP  65402 -> 43481  len 70
+      Andromeda  v1  VNI 100  flow 0x3f7a  hop 64
+      -- inner frame --
+        Ethernet  02:00:00:00:00:0a -> 02:00:00:00:00:0b  ethertype 0x0800 (IPv4)
+          IPv4  10.0.0.10 -> 10.0.0.20  proto 17 (UDP)  ttl 64  len 40  cksum ok
+            UDP  40000 -> 4242  len 20
+```
+
+`andromeda inspect <hex>` decodes any packet you paste (spaces/colons ignored) —
+feed it a `tcpdump -x` line and watch it unwrap the overlay. `andromeda bench`
+prints the forwarding-core throughput, and `andromeda selftest` runs the pipeline
+end to end. None of these need root or an AF_XDP-capable kernel.
 
 ## Seeing it work
 
@@ -151,18 +178,20 @@ IP 192.168.1.1.49152 > 192.168.1.2.43481:  (outer IPv4 + UDP to the Andromeda po
   0x0034:  0054 ...      4001 ... 0a0a 0002 0a0a 0001   inner IPv4 10.10.0.2 -> 10.10.0.1 (ICMP)
 ```
 
-`sudo ./scripts/demo-2node.sh` builds two nodes and pings **through** the overlay —
-tenant 10.0.0.10 reaches tenant 10.0.0.20 across two separate user-space switches,
-each encapsulating one direction and decapsulating the other:
+`sudo ./scripts/demo-2node.sh` builds two nodes (each from a generated TOML config)
+and pings **through** the overlay — tenant 10.0.0.10 reaches tenant 10.0.0.20 across
+two separate user-space switches, each encapsulating one direction and
+decapsulating the other. There are **no static ARP entries**: each switch proxy-ARPs
+its tenant as the distributed gateway.
 
 ```
 PING 10.0.0.20 (10.0.0.20) 56(84) bytes of data.
-64 bytes from 10.0.0.20: icmp_seq=1 ttl=64 time=0.413 ms
-64 bytes from 10.0.0.20: icmp_seq=2 ttl=64 time=0.243 ms
+64 bytes from 10.0.0.20: icmp_seq=1 ttl=64 time=0.381 ms
 --- 10.0.0.20 ping statistics ---
 4 packets transmitted, 4 received, 0% packet loss
-                                                 # node 1: encapped 4, decapped 4
-                                                 # node 2: encapped 4, decapped 4
+
+# the switch prints a live line each second:
+[+  3s] rx  25 ( 10 pps)  tx  5 ( 4 pps)  encap 2 decap 2 arp 1 drop 20
 ```
 
 ---

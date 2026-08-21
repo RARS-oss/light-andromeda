@@ -3,7 +3,9 @@ name = "andromeda-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Control plane: VPC/endpoint model and overlay forwarding (VNI + inner-IP -> underlay node) lookup"
+description = "Control plane: VPC/endpoint model, TOML fabric config, and overlay forwarding lookup"
 
 [dependencies]
 andromeda-core = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"

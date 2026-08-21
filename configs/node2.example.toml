@@ -1,0 +1,18 @@
+# Example fabric config for node 2 (underlay 192.168.1.2). See node1.example.toml.
+
+local_node          = "192.168.1.2"
+peer_node           = "192.168.1.1"
+vni                 = 100
+virtual_gateway_mac = "02:00:00:00:00:ff"
+vpc_cidr            = "10.0.0.0/24"
+
+[[endpoint]]
+inner_ip  = "10.0.0.10"
+inner_mac = "aa:bb:cc:00:00:10"
+node_ip   = "192.168.1.1"
+
+[[endpoint]]
+inner_ip  = "10.0.0.20"
+inner_mac = "aa:bb:cc:00:00:20"
+node_ip   = "192.168.1.2"
+local     = true

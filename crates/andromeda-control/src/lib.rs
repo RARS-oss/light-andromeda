@@ -15,6 +15,9 @@ use andromeda_core::ethernet::MacAddr;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+pub mod config;
+pub use config::{ConfigError, NodeConfig};
+
 /// A tenant virtual network, identified by its 24-bit VNI.
 #[derive(Clone, Debug)]
 pub struct Vpc {
@@ -69,7 +72,11 @@ pub struct Fabric {
 impl Fabric {
     #[must_use]
     pub fn new(local_node_ip: Ipv4Addr) -> Self {
-        Self { local_node_ip, vpcs: HashMap::new(), endpoints: HashMap::new() }
+        Self {
+            local_node_ip,
+            vpcs: HashMap::new(),
+            endpoints: HashMap::new(),
+        }
     }
 
     pub fn add_vpc(&mut self, vpc: Vpc) {
@@ -90,7 +97,11 @@ impl Fabric {
     #[must_use]
     pub fn resolve(&self, vni: u32, inner_dst: Ipv4Addr) -> Option<NextHop> {
         let ep = self.endpoints.get(&(vni, inner_dst))?;
-        Some(NextHop { node_ip: ep.node_ip, inner_mac: ep.inner_mac, local: ep.local })
+        Some(NextHop {
+            node_ip: ep.node_ip,
+            inner_mac: ep.inner_mac,
+            local: ep.local,
+        })
     }
 
     /// All endpoints local to this switch (used to program the tap/veth side).
@@ -114,7 +125,11 @@ mod tests {
 
     #[test]
     fn cidr_membership() {
-        let vpc = Vpc { vni: 100, name: "web".into(), cidr: ("10.0.0.0".parse().unwrap(), 24) };
+        let vpc = Vpc {
+            vni: 100,
+            name: "web".into(),
+            cidr: ("10.0.0.0".parse().unwrap(), 24),
+        };
         assert!(vpc.contains("10.0.0.42".parse().unwrap()));
         assert!(!vpc.contains("10.0.1.1".parse().unwrap()));
     }
@@ -122,7 +137,11 @@ mod tests {
     #[test]
     fn resolve_across_nodes() {
         let mut fab = Fabric::new("192.168.1.1".parse().unwrap());
-        fab.add_vpc(Vpc { vni: 100, name: "web".into(), cidr: ("10.0.0.0".parse().unwrap(), 24) });
+        fab.add_vpc(Vpc {
+            vni: 100,
+            name: "web".into(),
+            cidr: ("10.0.0.0".parse().unwrap(), 24),
+        });
         // Local endpoint on this node.
         fab.add_endpoint(Endpoint {
             vni: 100,

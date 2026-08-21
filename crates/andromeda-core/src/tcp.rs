@@ -27,11 +27,18 @@ pub struct TcpView<'a> {
 impl<'a> TcpView<'a> {
     pub fn parse(buf: &'a [u8]) -> Result<Self, ParseError> {
         if buf.len() < TCP_MIN_HDR_LEN {
-            return Err(ParseError::TooShort { what: "tcp", need: TCP_MIN_HDR_LEN, got: buf.len() });
+            return Err(ParseError::TooShort {
+                what: "tcp",
+                need: TCP_MIN_HDR_LEN,
+                got: buf.len(),
+            });
         }
         let data_off = (buf[12] >> 4) as usize * 4;
         if data_off < TCP_MIN_HDR_LEN || data_off > buf.len() {
-            return Err(ParseError::BadHeaderLen { what: "tcp", len: data_off });
+            return Err(ParseError::BadHeaderLen {
+                what: "tcp",
+                len: data_off,
+            });
         }
         Ok(Self { buf })
     }

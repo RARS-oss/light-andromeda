@@ -17,7 +17,7 @@ use andromeda_control::Fabric;
 use andromeda_core::ethernet::{self, EthFrame, EthFrameMut, MacAddr};
 use andromeda_core::ipv4::Ipv4View;
 use andromeda_core::overlay::{self, EncapParams};
-use andromeda_core::five_tuple_of;
+use andromeda_core::{arp, five_tuple_of};
 use andromeda_nat::{apply as nat_apply, Direction, NatEngine};
 use std::net::Ipv4Addr;
 
@@ -37,13 +37,20 @@ pub struct PipelineConfig {
     pub nat_ip: Option<Ipv4Addr>,
     /// If set, destinations with no in-VPC endpoint are sent here (default route).
     pub gateway_node_ip: Option<Ipv4Addr>,
+    /// The virtual MAC this switch answers tenant ARP requests with (distributed
+    /// overlay gateway). Tenants send to this MAC; the switch rewrites the inner
+    /// destination MAC to the real endpoint during encapsulation.
+    pub virtual_gateway_mac: MacAddr,
 }
 
 /// The outcome of feeding one frame to the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Transmit the first `usize` bytes of the output buffer.
+    /// Transmit the first `usize` bytes of the output buffer on the *egress* port.
     Forward(usize),
+    /// Transmit the first `usize` bytes of the output buffer back out the *ingress*
+    /// port (used for ARP replies to the tenant).
+    Reply(usize),
     /// Drop the frame; the reason is a static label for stats/logging.
     Drop(&'static str),
     /// Not ours — let the caller decide (e.g. hand back to the kernel).
@@ -55,6 +62,7 @@ pub struct PipelineStats {
     pub encapped: u64,
     pub decapped: u64,
     pub natted: u64,
+    pub arp_replied: u64,
     pub dropped: u64,
     pub passed: u64,
 }
@@ -72,7 +80,14 @@ pub struct Pipeline {
 impl Pipeline {
     #[must_use]
     pub fn new(cfg: PipelineConfig, fabric: Fabric, nat: NatEngine) -> Self {
-        Self { cfg, fabric, nat, scratch: Vec::with_capacity(2048), ip_id: 0, stats: PipelineStats::default() }
+        Self {
+            cfg,
+            fabric,
+            nat,
+            scratch: Vec::with_capacity(2048),
+            ip_id: 0,
+            stats: PipelineStats::default(),
+        }
     }
 
     #[must_use]
@@ -96,8 +111,25 @@ impl Pipeline {
             Ok(e) => e,
             Err(_) => return self.drop("bad-inner-eth"),
         };
+
+        // Proxy-ARP: answer tenant "who has X?" with the virtual gateway MAC so the
+        // tenant can send without knowing the far endpoint's real L2 address.
+        if eth.ethertype() == ethernet::ethertype::ARP {
+            match arp::ArpView::parse(eth.payload()) {
+                Ok(a) if a.is_request() && a.target_ip() != a.sender_ip() => {
+                    match arp::write_reply(out, eth.payload(), self.cfg.virtual_gateway_mac) {
+                        Ok(n) => {
+                            self.stats.arp_replied += 1;
+                            return Decision::Reply(n);
+                        }
+                        Err(_) => return self.drop("arp-build"),
+                    }
+                }
+                _ => return self.drop("arp-ignored"),
+            }
+        }
+
         if eth.ethertype() != ethernet::ethertype::IPV4 {
-            // ARP/IPv6 flooding is out of scope for the MVP; drop.
             return self.drop("non-ipv4-inner");
         }
         let inner_dst = match Ipv4View::parse(eth.payload()) {
@@ -231,18 +263,36 @@ mod tests {
         udp_dg[6..8].copy_from_slice(&c.to_be_bytes());
 
         let mut ippkt = vec![0u8; ipv4::IPV4_MIN_HDR_LEN + udp_dg.len()];
-        ipv4::write_header(&mut ippkt[..20], src, dst, proto::UDP, 64, 1, true, udp_dg.len() as u16);
+        ipv4::write_header(
+            &mut ippkt[..20],
+            src,
+            dst,
+            proto::UDP,
+            64,
+            1,
+            true,
+            udp_dg.len() as u16,
+        );
         ippkt[20..].copy_from_slice(&udp_dg);
 
         let mut frame = vec![0u8; ethernet::ETH_HDR_LEN + ippkt.len()];
-        ethernet::write_header(&mut frame[..14], mac(0xbb), mac(0xaa), ethernet::ethertype::IPV4);
+        ethernet::write_header(
+            &mut frame[..14],
+            mac(0xbb),
+            mac(0xaa),
+            ethernet::ethertype::IPV4,
+        );
         frame[14..].copy_from_slice(&ippkt);
         frame
     }
 
     fn two_node_pipeline() -> Pipeline {
         let mut fabric = Fabric::new("192.168.1.1".parse().unwrap());
-        fabric.add_vpc(Vpc { vni: 100, name: "t".into(), cidr: ("10.0.0.0".parse().unwrap(), 24) });
+        fabric.add_vpc(Vpc {
+            vni: 100,
+            name: "t".into(),
+            cidr: ("10.0.0.0".parse().unwrap(), 24),
+        });
         fabric.add_endpoint(Endpoint {
             vni: 100,
             inner_ip: "10.0.0.20".parse().unwrap(),
@@ -257,6 +307,7 @@ mod tests {
             vni: 100,
             nat_ip: None,
             gateway_node_ip: None,
+            virtual_gateway_mac: mac(0xff),
         };
         let nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20100);
         Pipeline::new(cfg, fabric, nat)
@@ -297,7 +348,10 @@ mod tests {
         let mut node1 = two_node_pipeline();
         let frame = tenant_udp_frame("10.0.0.10", "10.0.0.99", 1, 2, b"x");
         let mut wire = vec![0u8; 2048];
-        assert!(matches!(node1.on_tenant_frame(&frame, &mut wire, 1), Decision::Drop("no-route")));
+        assert!(matches!(
+            node1.on_tenant_frame(&frame, &mut wire, 1),
+            Decision::Drop("no-route")
+        ));
     }
 
     #[test]
@@ -320,6 +374,42 @@ mod tests {
         let ip = Ipv4View::parse(&d.inner[ethernet::ETH_HDR_LEN..]).unwrap();
         assert_eq!(ip.src(), "203.0.113.7".parse::<Ipv4Addr>().unwrap());
         assert!(ip.checksum_valid());
+    }
+
+    #[test]
+    fn proxy_arp_replies_to_tenant() {
+        let mut p = two_node_pipeline();
+        // Tenant 10.0.0.10 asks "who has 10.0.0.20?"
+        let mut req = vec![0u8; arp::ARP_FRAME_LEN];
+        ethernet::write_header(
+            &mut req[..14],
+            MacAddr::BROADCAST,
+            mac(0x0a),
+            ethernet::ethertype::ARP,
+        );
+        let pl = &mut req[14..];
+        pl[0..2].copy_from_slice(&1u16.to_be_bytes());
+        pl[2..4].copy_from_slice(&ethernet::ethertype::IPV4.to_be_bytes());
+        pl[4] = 6;
+        pl[5] = 4;
+        pl[6..8].copy_from_slice(&arp::oper::REQUEST.to_be_bytes());
+        pl[8..14].copy_from_slice(&mac(0x0a).0);
+        pl[14..18].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 10).octets());
+        pl[24..28].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 20).octets());
+
+        let mut out = vec![0u8; 128];
+        match p.on_tenant_frame(&req, &mut out, 1) {
+            Decision::Reply(n) => {
+                let eth = EthFrame::parse(&out[..n]).unwrap();
+                assert_eq!(eth.ethertype(), ethernet::ethertype::ARP);
+                assert_eq!(eth.dst(), mac(0x0a)); // replied to the requester
+                let a = arp::ArpView::parse(eth.payload()).unwrap();
+                assert_eq!(a.oper(), arp::oper::REPLY);
+                assert_eq!(a.sender_mac(), mac(0xff)); // virtual gateway MAC
+            }
+            other => panic!("expected Reply, got {other:?}"),
+        }
+        assert_eq!(p.stats().arp_replied, 1);
     }
 
     #[test]

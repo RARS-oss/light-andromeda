@@ -109,7 +109,10 @@ impl AndromedaHdr {
         }
         let version = buf[0] >> 4;
         if version != ANDROMEDA_VERSION {
-            return Err(ParseError::BadVersion { what: "andromeda", version });
+            return Err(ParseError::BadVersion {
+                what: "andromeda",
+                version,
+            });
         }
         Ok(Self {
             version,
@@ -167,7 +170,10 @@ pub struct EncapParams {
 pub fn encap(out: &mut [u8], inner: &[u8], p: &EncapParams) -> Result<usize, ParseError> {
     let total = OVERLAY_OVERHEAD + inner.len();
     if out.len() < total {
-        return Err(ParseError::BufferTooSmall { need: total, got: out.len() });
+        return Err(ParseError::BufferTooSmall {
+            need: total,
+            got: out.len(),
+        });
     }
 
     let eth_end = ethernet::ETH_HDR_LEN;
@@ -333,9 +339,27 @@ mod tests {
 
     #[test]
     fn flow_hash_is_stable_and_varies() {
-        let a = flow_hash(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2), 6, 1234, 80);
-        let b = flow_hash(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2), 6, 1234, 80);
-        let c = flow_hash(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2), 6, 1235, 80);
+        let a = flow_hash(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            6,
+            1234,
+            80,
+        );
+        let b = flow_hash(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            6,
+            1234,
+            80,
+        );
+        let c = flow_hash(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            6,
+            1235,
+            80,
+        );
         assert_eq!(a, b, "same tuple → same hash");
         assert_ne!(a, c, "different port → (very likely) different hash");
     }

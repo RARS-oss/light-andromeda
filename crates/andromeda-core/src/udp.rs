@@ -19,7 +19,11 @@ pub struct UdpView<'a> {
 impl<'a> UdpView<'a> {
     pub fn parse(buf: &'a [u8]) -> Result<Self, ParseError> {
         if buf.len() < UDP_HDR_LEN {
-            return Err(ParseError::TooShort { what: "udp", need: UDP_HDR_LEN, got: buf.len() });
+            return Err(ParseError::TooShort {
+                what: "udp",
+                need: UDP_HDR_LEN,
+                got: buf.len(),
+            });
         }
         Ok(Self { buf })
     }
@@ -53,7 +57,11 @@ pub struct UdpViewMut<'a> {
 impl<'a> UdpViewMut<'a> {
     pub fn parse(buf: &'a mut [u8]) -> Result<Self, ParseError> {
         if buf.len() < UDP_HDR_LEN {
-            return Err(ParseError::TooShort { what: "udp", need: UDP_HDR_LEN, got: buf.len() });
+            return Err(ParseError::TooShort {
+                what: "udp",
+                need: UDP_HDR_LEN,
+                got: buf.len(),
+            });
         }
         Ok(Self { buf })
     }
@@ -165,7 +173,10 @@ mod tests {
         check[6..8].copy_from_slice(&[0, 0]);
         let full = compute_checksum(src, dst, &check);
         let stored = u16::from_be_bytes([dgram[6], dgram[7]]);
-        assert_eq!(stored, full, "incremental port patch must equal full recompute");
+        assert_eq!(
+            stored, full,
+            "incremental port patch must equal full recompute"
+        );
         assert_eq!(UdpView::parse(&dgram).unwrap().dst_port(), 5353);
     }
 

@@ -17,7 +17,7 @@ use std::io;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[repr(C)]
 struct AndroXsk {
@@ -42,7 +42,8 @@ extern "C" {
     fn andro_xsk_fd(x: *mut AndroXsk) -> c_int;
     fn andro_fq_push(x: *mut AndroXsk, addrs: *const u64, n: c_uint) -> c_uint;
     fn andro_rx_peek(x: *mut AndroXsk, addrs: *mut u64, lens: *mut c_uint, max: c_uint) -> c_uint;
-    fn andro_tx_push(x: *mut AndroXsk, addrs: *const u64, lens: *const c_uint, n: c_uint) -> c_uint;
+    fn andro_tx_push(x: *mut AndroXsk, addrs: *const u64, lens: *const c_uint, n: c_uint)
+        -> c_uint;
     fn andro_cq_collect(x: *mut AndroXsk, addrs: *mut u64, max: c_uint) -> c_uint;
     fn andro_tx_needs_wakeup(x: *mut AndroXsk) -> c_int;
     fn andro_kick_tx(x: *mut AndroXsk) -> c_int;
@@ -122,9 +123,16 @@ impl XskSocket {
         let area = unsafe { andro_umem_area(ptr) };
         let fd = unsafe { andro_xsk_fd(ptr) };
         // All frames start free; RX frames get moved into the FILL ring below.
-        let free: Vec<u64> =
-            (0..cfg.n_frames as u64).map(|i| i * cfg.frame_size as u64).collect();
-        let mut s = Self { ptr, area, frame_size: cfg.frame_size, fd, free };
+        let free: Vec<u64> = (0..cfg.n_frames as u64)
+            .map(|i| i * cfg.frame_size as u64)
+            .collect();
+        let mut s = Self {
+            ptr,
+            area,
+            frame_size: cfg.frame_size,
+            fd,
+            free,
+        };
         s.refill(cfg.fill_size);
         Ok(s)
     }
@@ -146,8 +154,8 @@ impl XskSocket {
         }
         let take = (want as usize).min(self.free.len());
         let start = self.free.len() - take;
-        let pushed =
-            unsafe { andro_fq_push(self.ptr, self.free[start..].as_ptr(), take as c_uint) } as usize;
+        let pushed = unsafe { andro_fq_push(self.ptr, self.free[start..].as_ptr(), take as c_uint) }
+            as usize;
         self.free.truncate(self.free.len() - pushed);
         pushed as u32
     }
@@ -174,9 +182,14 @@ impl XskSocket {
     }
 
     /// Mutable, full-size view of a frame's bytes (for building a TX packet).
-    /// The caller guarantees this frame differs from any live [`frame`] view.
+    ///
+    /// Takes `&self` on purpose: the forwarding loop needs an immutable [`frame`]
+    /// view of the RX frame and a mutable view of a *different* TX frame at the same
+    /// time. The caller guarantees `addr` differs from any live `frame` view, so the
+    /// two slices never alias — hence the `mut_from_ref` allow.
     #[inline]
     #[must_use]
+    #[allow(clippy::mut_from_ref)]
     pub fn frame_mut(&self, addr: u64) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.area.add(addr as usize), self.frame_size as usize) }
     }
@@ -322,13 +335,12 @@ pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::
                             pipeline.on_tenant_frame(inner, out, now_ms)
                         };
                         match decision {
-                            Decision::Forward(m) => {
-                                if sock.tx_one(tx_addr, m as u32) {
-                                    stats.tx += 1;
-                                } else {
-                                    sock.recycle(tx_addr);
-                                    stats.dropped += 1;
-                                }
+                            // Forward (encapsulated) and Reply (ARP) both TX on this
+                            // single socket.
+                            Decision::Forward(m) | Decision::Reply(m)
+                                if sock.tx_one(tx_addr, m as u32) =>
+                            {
+                                stats.tx += 1;
                             }
                             _ => {
                                 sock.recycle(tx_addr);
@@ -388,6 +400,8 @@ pub fn run_switch(
     let mut lens = vec![0u32; batch as usize];
     let mut stats = RunStats::default();
     let start = Instant::now();
+    let mut report_at = Instant::now();
+    let (mut last_rx, mut last_tx) = (0u64, 0u64);
 
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -404,10 +418,40 @@ pub fn run_switch(
             }
         }
 
+        // Live stats line, once a second — interesting to watch under load.
+        let since = report_at.elapsed();
+        if since >= Duration::from_secs(1) {
+            let dt = since.as_secs_f64();
+            let ps = pipeline.stats();
+            println!(
+                "[+{:>3}s] rx {:>9} ({:>8.0} pps)  tx {:>9} ({:>8.0} pps)  encap {} decap {} arp {} drop {}",
+                start.elapsed().as_secs(),
+                stats.rx,
+                (stats.rx - last_rx) as f64 / dt,
+                stats.tx,
+                (stats.tx - last_tx) as f64 / dt,
+                ps.encapped,
+                ps.decapped,
+                ps.arp_replied,
+                stats.dropped,
+            );
+            last_rx = stats.rx;
+            last_tx = stats.tx;
+            report_at = Instant::now();
+        }
+
         // Wait on both sockets at once.
         let mut pfds = [
-            libc::pollfd { fd: tenant.fd(), events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: underlay.fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: tenant.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: underlay.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let pr = unsafe { libc::poll(pfds.as_mut_ptr(), 2, 200) };
         let now_ms = start.elapsed().as_millis() as u64;
@@ -426,7 +470,25 @@ pub fn run_switch(
                         pipeline.on_tenant_frame(inner, out, now_ms)
                     };
                     match decision {
+                        // Encapsulated frame → out the underlay port.
                         Decision::Forward(m) if underlay.tx_one(tx_addr, m as u32) => stats.tx += 1,
+                        // ARP reply → back out the tenant port. The bytes were built
+                        // into an underlay frame, so copy them into a tenant frame.
+                        Decision::Reply(m) => {
+                            let reply = underlay.frame(tx_addr, m as u32).to_vec();
+                            underlay.recycle(tx_addr);
+                            if let Some(t_addr) = tenant.alloc_tx() {
+                                tenant.frame_mut(t_addr)[..m].copy_from_slice(&reply);
+                                if tenant.tx_one(t_addr, m as u32) {
+                                    stats.tx += 1;
+                                } else {
+                                    tenant.recycle(t_addr);
+                                    stats.dropped += 1;
+                                }
+                            } else {
+                                stats.dropped += 1;
+                            }
+                        }
                         _ => {
                             underlay.recycle(tx_addr);
                             stats.dropped += 1;
