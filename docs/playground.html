@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Andromeda Overlay Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    /* cool, signal-scope neutrals */
+    --bg: #eef2f2;
+    --panel: #ffffff;
+    --panel-2: #f6f9f9;
+    --ink: #16232a;
+    --muted: #5c7079;
+    --faint: #8798a0;
+    --line: #dbe4e5;
+    --line-strong: #c4d0d1;
+    --accent: #0e9c8c;
+    --accent-ink: #0b3f3a;
+    --good: #2f8f5b;
+    --bad: #c0563f;
+    --shadow: 0 1px 2px rgba(16,32,40,.06), 0 8px 30px rgba(16,32,40,.06);
+    /* layer hues (light) */
+    --l-oeth: #5f7f9c;
+    --l-oip:  #b9812f;
+    --l-oudp: #c15f6c;
+    --l-andro:#0e9c8c;
+    --l-ieth: #6f6fc0;
+    --l-iip:  #3f915f;
+    --l-il4:  #a457b6;
+    --tint: 0.14;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --bg: #0c1316;
+      --panel: #121b1f;
+      --panel-2: #0f181b;
+      --ink: #dbe7e7;
+      --muted: #8ba0a7;
+      --faint: #66797f;
+      --line: #212f33;
+      --line-strong: #2c3d42;
+      --accent: #2bc4b2;
+      --accent-ink: #d3fff8;
+      --good: #57c98a;
+      --bad: #e98a71;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.35);
+      --l-oeth: #7ea2c4;
+      --l-oip:  #e0a95a;
+      --l-oudp: #e08592;
+      --l-andro:#2bc4b2;
+      --l-ieth: #9a95ea;
+      --l-iip:  #66c187;
+      --l-il4:  #ca87dd;
+      --tint: 0.2;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c1316;
+    --panel: #121b1f;
+    --panel-2: #0f181b;
+    --ink: #dbe7e7;
+    --muted: #8ba0a7;
+    --faint: #66797f;
+    --line: #212f33;
+    --line-strong: #2c3d42;
+    --accent: #2bc4b2;
+    --accent-ink: #d3fff8;
+    --good: #57c98a;
+    --bad: #e98a71;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.35);
+    --l-oeth: #7ea2c4;
+    --l-oip:  #e0a95a;
+    --l-oudp: #e08592;
+    --l-andro:#2bc4b2;
+    --l-ieth: #9a95ea;
+    --l-iip:  #66c187;
+    --l-il4:  #ca87dd;
+    --tint: 0.2;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 26px 22px 64px; }
+
+  /* header */
+  header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 22px; }
+  .brand h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 4px; text-wrap: balance; }
+  .brand .kicker { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); margin: 0 0 8px; }
+  .brand p { margin: 0; color: var(--muted); max-width: 62ch; font-size: 14px; }
+  .theme-toggle {
+    font: 500 12px/1 "IBM Plex Mono", monospace; letter-spacing: .04em;
+    color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 12px; cursor: pointer; white-space: nowrap;
+  }
+  .theme-toggle:hover { border-color: var(--line-strong); color: var(--ink); }
+
+  /* path strip */
+  .path {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden;
+  }
+  .path-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .path-head .label { font: 600 11px/1 "IBM Plex Mono", monospace; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); }
+  .send-btn {
+    font: 600 12px/1 "IBM Plex Sans", sans-serif; color: #04211e; background: var(--accent);
+    border: none; border-radius: 8px; padding: 9px 15px; cursor: pointer; letter-spacing: .01em;
+  }
+  .send-btn:hover { filter: brightness(1.06); }
+  .send-btn:active { transform: translateY(1px); }
+  .track { position: relative; height: 88px; }
+  .rail { position: absolute; left: 6%; right: 6%; top: 30px; height: 2px; background: var(--line-strong); border-radius: 2px; }
+  .stations { position: absolute; inset: 0; display: flex; justify-content: space-between; padding: 0 2%; }
+  .station { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 20%; text-align: center; }
+  .dot { width: 13px; height: 13px; border-radius: 50%; background: var(--panel); border: 2px solid var(--line-strong); margin-top: 24px; }
+  .station.node .dot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+  .station .name { font: 600 12px/1.2 "IBM Plex Sans"; }
+  .station .sub { font: 400 10.5px/1.2 "IBM Plex Mono", monospace; color: var(--faint); }
+  .pkt {
+    position: absolute; top: 18px; left: 6%; transform: translateX(-50%);
+    background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+    border: 1px solid var(--accent); color: var(--accent-ink);
+    font: 600 10.5px/1 "IBM Plex Mono", monospace; padding: 5px 8px; border-radius: 6px;
+    white-space: nowrap; transition: left .5s ease, background .3s, width .3s; opacity: 0;
+  }
+
+  /* main grid */
+  .grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+  .card > h2 { font: 600 12px/1 "IBM Plex Mono", monospace; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); margin: 0; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+
+  /* controls */
+  .controls { padding: 16px 18px 20px; display: flex; flex-direction: column; gap: 18px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 7px; }
+  .preset { font: 500 12px/1 "IBM Plex Sans"; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 20px; padding: 7px 12px; cursor: pointer; }
+  .preset:hover { border-color: var(--line-strong); color: var(--ink); }
+  .preset[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border-color: var(--accent); color: var(--accent-ink); }
+  fieldset { border: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  legend { font: 600 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); padding: 0; margin-bottom: 2px; }
+  .field { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 10px; }
+  .field label { font-size: 12.5px; color: var(--muted); }
+  .field input, .field select {
+    width: 100%; font: 500 13px/1 "IBM Plex Mono", monospace; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px;
+  }
+  .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .field input.invalid { border-color: var(--bad); }
+  .seg { display: flex; gap: 6px; }
+  .seg button { flex: 1; font: 500 12px/1 "IBM Plex Sans"; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 8px 0; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border-color: var(--accent); color: var(--accent-ink); }
+
+  /* output */
+  .out { display: flex; flex-direction: column; gap: 20px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 18px; }
+  .chip { display: flex; flex-direction: column; gap: 3px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; min-width: 96px; }
+  .chip .k { font: 500 10px/1 "IBM Plex Mono", monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+  .chip .v { font: 600 15px/1.1 "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+  .chip .v.ok { color: var(--good); }
+  .chip .v.no { color: var(--bad); }
+  .chip.hero { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+
+  /* layer stack */
+  .layers { padding: 14px 18px 20px; display: flex; flex-direction: column; gap: 0; }
+  .layer { border-left: 3px solid var(--lc); border-radius: 0 8px 8px 0; padding: 9px 12px; margin-bottom: 6px; background: color-mix(in srgb, var(--lc) calc(var(--tint) * 100%), var(--panel)); cursor: default; transition: box-shadow .12s, transform .12s; }
+  .layer[data-depth="1"] { margin-left: 26px; }
+  .layer .lh { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .layer .lname { font: 600 13px/1.2 "IBM Plex Sans"; }
+  .layer .lname b { color: var(--lc); }
+  .layer .lrange { font: 500 10.5px/1 "IBM Plex Mono", monospace; color: var(--faint); }
+  .layer .fields { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .layer .f { font: 500 11.5px/1.3 "IBM Plex Mono", monospace; color: var(--muted); }
+  .layer .f b { color: var(--ink); font-weight: 600; }
+  .layer.hot { box-shadow: 0 0 0 2px var(--lc); }
+  .depthwrap { position: relative; }
+
+  /* hex */
+  .hex { padding: 14px 18px 20px; overflow-x: auto; }
+  .hexrow { display: flex; gap: 14px; font-family: "IBM Plex Mono", monospace; font-size: 13px; line-height: 1.7; white-space: nowrap; }
+  .hexoff { color: var(--faint); user-select: none; }
+  .hexbytes b, .hexascii b { font-weight: 500; padding: 1px 1.5px; border-radius: 3px; cursor: default; }
+  .hexbytes b { margin-right: 4px; }
+  .hexascii { color: var(--muted); }
+  .hexascii b { padding: 1px 0; }
+  .b { background: color-mix(in srgb, var(--lc) calc(var(--tint) * 100%), transparent); color: var(--ink); }
+  .b.hot { background: var(--lc); color: #08120f; }
+  :root[data-theme="dark"] .b.hot, :root:not([data-theme="light"]) .b.hot { color: #08120f; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 18px 18px; }
+  .legend span { font: 500 11px/1 "IBM Plex Mono", monospace; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; cursor: default; }
+  .legend i { width: 11px; height: 11px; border-radius: 3px; background: var(--lc); display: inline-block; }
+
+  .foot { margin-top: 26px; color: var(--faint); font-size: 12.5px; text-align: center; }
+  .foot code { font-family: "IBM Plex Mono", monospace; color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { .pkt { transition: opacity .2s; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <p class="kicker">Light-Andromeda · VPC overlay</p>
+      <h1>Andromeda Overlay Playground</h1>
+      <p>Build a tenant packet and watch a user-space switch wrap it in the Andromeda overlay — the same L2-over-UDP encapsulation the dataplane emits. Every byte below is computed exactly as the Rust code computes it, checksums and flow hash included.</p>
+    </div>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ theme</button>
+  </header>
+
+  <section class="path" aria-label="Two-node overlay path">
+    <div class="path-head">
+      <span class="label">tenant → encap → underlay → decap → tenant</span>
+      <button class="send-btn" id="sendBtn" type="button">▶ Send through overlay</button>
+    </div>
+    <div class="track">
+      <div class="rail"></div>
+      <div class="pkt mono" id="pkt">inner</div>
+      <div class="stations">
+        <div class="station"><div class="dot"></div><div class="name">Tenant A</div><div class="sub" id="stA">10.0.0.10</div></div>
+        <div class="station node"><div class="dot"></div><div class="name">Switch 1</div><div class="sub">encap</div></div>
+        <div class="station"><div class="dot"></div><div class="name">Underlay</div><div class="sub" id="stU">UDP :43481</div></div>
+        <div class="station node"><div class="dot"></div><div class="name">Switch 2</div><div class="sub">decap</div></div>
+        <div class="station"><div class="dot"></div><div class="name">Tenant B</div><div class="sub" id="stB">10.0.0.20</div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="card" aria-label="Packet builder">
+      <h2>Tenant packet</h2>
+      <div class="controls">
+        <div class="presets" id="presets" role="group" aria-label="Presets">
+          <button class="preset" data-preset="udp" type="button">UDP flow</button>
+          <button class="preset" data-preset="dns" type="button">DNS query</button>
+          <button class="preset" data-preset="tcp" type="button">TCP SYN</button>
+          <button class="preset" data-preset="icmp" type="button">ICMP ping</button>
+        </div>
+
+        <fieldset>
+          <legend>Inner (tenant)</legend>
+          <div class="field"><label for="isrc">src IP</label><input id="isrc" class="mono" value="10.0.0.10"></div>
+          <div class="field"><label for="idst">dst IP</label><input id="idst" class="mono" value="10.0.0.20"></div>
+          <div class="field"><label>L4</label>
+            <div class="seg" id="proto" role="group" aria-label="Protocol">
+              <button data-proto="udp" type="button">UDP</button>
+              <button data-proto="tcp" type="button">TCP</button>
+              <button data-proto="icmp" type="button">ICMP</button>
+            </div>
+          </div>
+          <div class="field portrow"><label for="sport">src port</label><input id="sport" class="mono" value="40000" inputmode="numeric"></div>
+          <div class="field portrow"><label for="dport">dst port</label><input id="dport" class="mono" value="4242" inputmode="numeric"></div>
+          <div class="field"><label for="plen">payload</label><input id="plen" class="mono" value="12" inputmode="numeric"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Overlay</legend>
+          <div class="field"><label for="vni">VNI</label><input id="vni" class="mono" value="100" inputmode="numeric"></div>
+          <div class="field"><label for="osrc">node A</label><input id="osrc" class="mono" value="192.168.1.1"></div>
+          <div class="field"><label for="odst">node B</label><input id="odst" class="mono" value="192.168.1.2"></div>
+        </fieldset>
+      </div>
+    </section>
+
+    <section class="out">
+      <div class="card">
+        <h2>On the wire</h2>
+        <div class="summary" id="summary"></div>
+      </div>
+      <div class="card">
+        <h2>Encapsulation stack</h2>
+        <div class="layers" id="layers"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="card">
+        <h2>Hex dump</h2>
+        <div class="hex mono" id="hex"></div>
+      </div>
+    </section>
+  </div>
+
+  <p class="foot">Reproduces <code>andromeda inspect</code>: manual header assembly, RFC&nbsp;1071 checksums, FNV-1a flow hash → outer UDP source port. Overlay overhead is a fixed 50&nbsp;bytes.</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  // ---- theme toggle ----
+  const root = document.documentElement;
+  try {
+    const saved = localStorage.getItem("andromeda-theme");
+    if (saved) root.setAttribute("data-theme", saved);
+  } catch (e) {}
+  $("themeBtn").addEventListener("click", () => {
+    const cur = root.getAttribute("data-theme");
+    const isDark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = isDark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("andromeda-theme", next); } catch (e) {}
+  });
+
+  // ---- byte helpers ----
+  const ANDROMEDA_PORT = 43481;
+  const be16 = (n) => [(n >> 8) & 0xff, n & 0xff];
+  const be32 = (n) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  const ip4 = (s) => s.trim().split(".").map((x) => parseInt(x, 10) & 0xff);
+  const macB = (s) => s.split(":").map((x) => parseInt(x, 16) & 0xff);
+  const validIp = (s) => { const p = s.trim().split("."); return p.length === 4 && p.every((x) => /^\d+$/.test(x) && +x >= 0 && +x <= 255); };
+
+  function inetSum(bytes, start, end) {
+    let sum = 0;
+    for (let i = start; i < end; i += 2) {
+      const hi = bytes[i], lo = i + 1 < end ? bytes[i + 1] : 0;
+      sum += (hi << 8) | lo;
+    }
+    return sum;
+  }
+  const fold = (s) => { while (s >> 16) s = (s & 0xffff) + (s >> 16); return s; };
+  const inetChecksum = (bytes, s, e) => (~fold(inetSum(bytes, s, e))) & 0xffff;
+
+  function pseudoSum(src, dst, proto, len) {
+    return inetSum(src, 0, 4) + inetSum(dst, 0, 4) + proto + len;
+  }
+  function l4Checksum(src, dst, proto, l4) {
+    let c = (~fold(pseudoSum(src, dst, proto, l4.length) + inetSum(l4, 0, l4.length))) & 0xffff;
+    return c;
+  }
+
+  // FNV-1a over the inner 5-tuple, folded 32 -> 16 (matches andromeda-core::overlay::flow_hash)
+  function flowHash(src, dst, proto, sp, dp) {
+    let h = 0x811c9dc5 >>> 0;
+    const P = 0x01000193;
+    const mix = (b) => { h = (h ^ b) >>> 0; h = Math.imul(h, P) >>> 0; };
+    src.forEach(mix); dst.forEach(mix); mix(proto);
+    be16(sp).forEach(mix); be16(dp).forEach(mix);
+    return ((h >>> 16) ^ (h & 0xffff)) & 0xffff;
+  }
+
+  const PROTO = { udp: 17, tcp: 6, icmp: 1 };
+
+  function buildIPv4(src, dst, proto, l4, id, ttl) {
+    const total = 20 + l4.length;
+    const h = [0x45, 0x00, ...be16(total), ...be16(id), ...be16(0x4000), ttl, proto, 0, 0, ...src, ...dst];
+    const c = inetChecksum(h, 0, 20);
+    h[10] = (c >> 8) & 0xff; h[11] = c & 0xff;
+    return h.concat(l4);
+  }
+
+  function buildL4(kind, src, dst, sp, dp, payloadLen) {
+    const payload = new Array(payloadLen).fill(0xab);
+    if (kind === "udp") {
+      const u = [...be16(sp), ...be16(dp), ...be16(8 + payload.length), 0, 0, ...payload];
+      let c = l4Checksum(src, dst, 17, u); if (c === 0) c = 0xffff;
+      u[6] = (c >> 8) & 0xff; u[7] = c & 0xff;
+      return { bytes: u, l4len: u.length, label: "UDP", fields: [["src", sp], ["dst", dp], ["len", 8 + payload.length]] };
+    }
+    if (kind === "tcp") {
+      const t = [...be16(sp), ...be16(dp), ...be32(0x1000), ...be32(0), 0x50, 0x02, ...be16(0x7210), 0, 0, ...be16(0), ...payload];
+      const c = l4Checksum(src, dst, 6, t);
+      t[16] = (c >> 8) & 0xff; t[17] = c & 0xff;
+      return { bytes: t, l4len: t.length, label: "TCP", fields: [["src", sp], ["dst", dp], ["flags", "SYN"], ["win", 0x7210]] };
+    }
+    // icmp echo request
+    const ic = [8, 0, 0, 0, ...be16(0x0001), ...be16(0x0001), ...payload];
+    const c = inetChecksum(ic, 0, ic.length);
+    ic[2] = (c >> 8) & 0xff; ic[3] = c & 0xff;
+    return { bytes: ic, l4len: ic.length, label: "ICMP", fields: [["type", "8 (echo)"], ["id", 1], ["seq", 1]] };
+  }
+
+  const INNER_DST_MAC = "02:00:00:00:00:0b";
+  const INNER_SRC_MAC = "02:00:00:00:00:0a";
+  const OUTER_DST_MAC = "02:00:00:00:a1:02";
+  const OUTER_SRC_MAC = "02:00:00:00:a1:01";
+
+  function build(cfg) {
+    const isrc = ip4(cfg.isrc), idst = ip4(cfg.idst);
+    const osrc = ip4(cfg.osrc), odst = ip4(cfg.odst);
+    const proto = PROTO[cfg.proto];
+    const hasPorts = cfg.proto !== "icmp";
+    const sp = hasPorts ? cfg.sport : 0, dp = hasPorts ? cfg.dport : 0;
+
+    const l4 = buildL4(cfg.proto, isrc, idst, sp, dp, cfg.plen);
+    const innerIP = buildIPv4(isrc, idst, proto, l4.bytes, 1, 64);
+    const innerEth = [...macB(INNER_DST_MAC), ...macB(INNER_SRC_MAC), ...be16(0x0800)];
+    const innerFrame = innerEth.concat(innerIP);
+
+    const fh = hasPorts ? flowHash(isrc, idst, proto, sp, dp) : 0;
+    const vni = cfg.vni & 0xffffff;
+    const andro = [(1 << 4) | 0, 0, ...be16(fh), (vni >> 16) & 0xff, (vni >> 8) & 0xff, vni & 0xff, 64];
+
+    const outerSport = (fh | 0xc000) & 0xffff;
+    const udpPayload = andro.concat(innerFrame);
+    const outerUdp = [...be16(outerSport), ...be16(ANDROMEDA_PORT), ...be16(8 + udpPayload.length), 0, 0];
+    let uc = l4Checksum(osrc, odst, 17, outerUdp.concat(udpPayload)); if (uc === 0) uc = 0xffff;
+    outerUdp[6] = (uc >> 8) & 0xff; outerUdp[7] = uc & 0xff;
+
+    const outerIP = buildIPv4(osrc, odst, 17, outerUdp.concat(udpPayload), 0x4242, 64);
+    const outerEth = [...macB(OUTER_DST_MAC), ...macB(OUTER_SRC_MAC), ...be16(0x0800)];
+
+    const bytes = outerEth.concat(outerIP);
+    const packet = bytes; // outerEth + outerIP already includes udp+payload
+
+    // Offsets
+    let o = 0;
+    const segs = [];
+    const push = (id, name, len, depth, fields) => { segs.push({ id, name, start: o, end: o + len, depth, fields }); o += len; };
+    o = 0;
+    push("oeth", "Outer Ethernet", 14, 0, [["dst", OUTER_DST_MAC], ["src", OUTER_SRC_MAC], ["type", "0x0800"]]);
+    push("oip", "Outer IPv4", 20, 0, [["src", cfg.osrc], ["dst", cfg.odst], ["proto", "17 UDP"], ["ttl", 64]]);
+    push("oudp", "Outer UDP", 8, 0, [["src", outerSport], ["dst", ANDROMEDA_PORT + " ⟵ Andromeda"], ["len", 8 + udpPayload.length]]);
+    push("andro", "Andromeda header", 8, 0, [["ver", 1], ["VNI", vni], ["flow", "0x" + fh.toString(16).padStart(4, "0")], ["hop", 64]]);
+    push("ieth", "Inner Ethernet", 14, 1, [["dst", INNER_DST_MAC], ["src", INNER_SRC_MAC], ["type", "0x0800"]]);
+    push("iip", "Inner IPv4", 20, 1, [["src", cfg.isrc], ["dst", cfg.idst], ["proto", proto + " " + l4.label], ["ttl", 64]]);
+    push("il4", "Inner " + l4.label + (cfg.plen ? " + payload" : ""), l4.l4len, 1, l4.fields.map(([k, v]) => [k, v]));
+
+    return {
+      bytes: packet,
+      segs,
+      innerLen: innerFrame.length,
+      flow: fh,
+      outerSport,
+      ipOk: inetChecksum(packet, 14, 34) === 0,
+      udpOk: uc !== 0,
+      total: packet.length,
+    };
+  }
+
+  const LAYER_VARS = { oeth: "--l-oeth", oip: "--l-oip", oudp: "--l-oudp", andro: "--l-andro", ieth: "--l-ieth", iip: "--l-iip", il4: "--l-il4" };
+  const LAYER_SHORT = { oeth: "Outer Eth", oip: "Outer IP", oudp: "Outer UDP", andro: "Andromeda", ieth: "Inner Eth", iip: "Inner IP", il4: "Inner L4" };
+
+  function render(model) {
+    // summary
+    const s = $("summary");
+    s.innerHTML = "";
+    const chip = (k, v, cls, hero) => {
+      const d = document.createElement("div"); d.className = "chip" + (hero ? " hero" : "");
+      d.innerHTML = `<span class="k">${k}</span><span class="v ${cls || ""}">${v}</span>`;
+      return d;
+    };
+    s.append(
+      chip("wire bytes", model.total, "", true),
+      chip("overhead", "50 B", ""),
+      chip("inner", model.innerLen + " B", ""),
+      chip("VNI", model.segs[3].fields[1][1], ""),
+      chip("flow hash", "0x" + model.flow.toString(16).padStart(4, "0"), ""),
+      chip("outer sport", model.outerSport, ""),
+      chip("IPv4 cksum", model.ipOk ? "valid" : "bad", model.ipOk ? "ok" : "no"),
+      chip("UDP cksum", model.udpOk ? "valid" : "bad", model.udpOk ? "ok" : "no"),
+    );
+
+    // layers
+    const L = $("layers"); L.innerHTML = "";
+    model.segs.forEach((seg) => {
+      const el = document.createElement("div");
+      el.className = "layer"; el.dataset.seg = seg.id; el.dataset.depth = seg.depth;
+      el.style.setProperty("--lc", "var(" + LAYER_VARS[seg.id] + ")");
+      const fields = seg.fields.map(([k, v]) => `<span class="f">${k} <b>${v}</b></span>`).join("");
+      el.innerHTML = `<div class="lh"><span class="lname">${seg.name}</span><span class="lrange">[${seg.start}..${seg.end}]</span></div><div class="fields">${fields}</div>`;
+      L.append(el);
+    });
+
+    // legend
+    const lg = $("legend"); lg.innerHTML = "";
+    model.segs.forEach((seg) => {
+      const sp = document.createElement("span");
+      sp.dataset.seg = seg.id; sp.style.setProperty("--lc", "var(" + LAYER_VARS[seg.id] + ")");
+      sp.innerHTML = `<i></i>${LAYER_SHORT[seg.id]}`;
+      lg.append(sp);
+    });
+
+    // hex
+    const segOf = new Array(model.total);
+    model.segs.forEach((seg) => { for (let i = seg.start; i < seg.end; i++) segOf[i] = seg.id; });
+    const hex = $("hex"); hex.innerHTML = "";
+    for (let row = 0; row < model.total; row += 16) {
+      const line = document.createElement("div"); line.className = "hexrow";
+      const off = document.createElement("span"); off.className = "hexoff";
+      off.textContent = row.toString(16).padStart(4, "0");
+      const hb = document.createElement("span"); hb.className = "hexbytes";
+      const ha = document.createElement("span"); ha.className = "hexascii";
+      for (let i = row; i < Math.min(row + 16, model.total); i++) {
+        const id = segOf[i];
+        const b = document.createElement("b"); b.className = "b"; b.dataset.seg = id;
+        b.style.setProperty("--lc", "var(" + LAYER_VARS[id] + ")");
+        b.textContent = model.bytes[i].toString(16).padStart(2, "0");
+        hb.append(b);
+        const a = document.createElement("b"); a.className = "b"; a.dataset.seg = id;
+        a.style.setProperty("--lc", "var(" + LAYER_VARS[id] + ")");
+        const c = model.bytes[i];
+        a.textContent = c >= 32 && c < 127 ? String.fromCharCode(c) : ".";
+        ha.append(a);
+      }
+      line.append(off, hb, ha);
+      hex.append(line);
+    }
+  }
+
+  // ---- hover linking ----
+  let hot = null;
+  function setHot(id) {
+    if (hot === id) return;
+    hot = id;
+    document.querySelectorAll(".layer").forEach((e) => e.classList.toggle("hot", e.dataset.seg === id));
+    document.querySelectorAll(".hexbytes .b, .hexascii .b").forEach((e) => e.classList.toggle("hot", id && e.dataset.seg === id));
+  }
+  document.addEventListener("mouseover", (e) => {
+    const t = e.target.closest("[data-seg]");
+    if (t) setHot(t.dataset.seg);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (!e.relatedTarget || !e.relatedTarget.closest("[data-seg]")) setHot(null);
+  });
+
+  // ---- inputs ----
+  const state = { isrc: "10.0.0.10", idst: "10.0.0.20", proto: "udp", sport: 40000, dport: 4242, plen: 12, vni: 100, osrc: "192.168.1.1", odst: "192.168.1.2" };
+
+  function readInputs() {
+    const num = (id, max) => Math.max(0, Math.min(max, parseInt($(id).value, 10) || 0));
+    state.isrc = $("isrc").value; state.idst = $("idst").value;
+    state.osrc = $("osrc").value; state.odst = $("odst").value;
+    state.sport = num("sport", 65535); state.dport = num("dport", 65535);
+    state.plen = num("plen", 1400); state.vni = num("vni", 0xffffff);
+    [["isrc", state.isrc], ["idst", state.idst], ["osrc", state.osrc], ["odst", state.odst]]
+      .forEach(([id, v]) => $(id).classList.toggle("invalid", !validIp(v)));
+  }
+
+  function update() {
+    readInputs();
+    if (![state.isrc, state.idst, state.osrc, state.odst].every(validIp)) return;
+    const model = build(state);
+    render(model);
+    $("stA").textContent = state.isrc;
+    $("stB").textContent = state.idst;
+  }
+
+  function setProto(p) {
+    state.proto = p;
+    document.querySelectorAll("#proto button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.proto === p)));
+    document.querySelectorAll(".portrow").forEach((r) => r.style.display = p === "icmp" ? "none" : "");
+    update();
+  }
+
+  ["isrc", "idst", "osrc", "odst", "sport", "dport", "plen", "vni"].forEach((id) =>
+    $(id).addEventListener("input", update));
+  document.querySelectorAll("#proto button").forEach((b) =>
+    b.addEventListener("click", () => setProto(b.dataset.proto)));
+
+  const PRESETS = {
+    udp: { isrc: "10.0.0.10", idst: "10.0.0.20", proto: "udp", sport: 40000, dport: 4242, plen: 12 },
+    dns: { isrc: "10.0.0.10", idst: "10.0.0.53", proto: "udp", sport: 51000, dport: 53, plen: 29 },
+    tcp: { isrc: "10.0.0.10", idst: "10.0.0.20", proto: "tcp", sport: 49152, dport: 80, plen: 0 },
+    icmp: { isrc: "10.0.0.10", idst: "10.0.0.20", proto: "icmp", sport: 0, dport: 0, plen: 32 },
+  };
+  document.querySelectorAll(".preset").forEach((b) => b.addEventListener("click", () => {
+    const p = PRESETS[b.dataset.preset];
+    $("isrc").value = p.isrc; $("idst").value = p.idst;
+    $("sport").value = p.sport; $("dport").value = p.dport; $("plen").value = p.plen;
+    document.querySelectorAll(".preset").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    setProto(p.proto);
+  }));
+
+  // ---- send animation ----
+  const stops = [6, 28, 50, 72, 94]; // % positions matching stations
+  const sendBtn = $("sendBtn"), pkt = $("pkt");
+  let animating = false;
+  function sendAnim() {
+    if (animating) return;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    animating = true;
+    const total = $("summary") ? state : state;
+    const model = build(state);
+    const seq = [
+      { i: 0, t: "inner " + model.innerLen + "B", cls: "" },
+      { i: 1, t: "+ overlay", cls: "" },
+      { i: 2, t: model.total + "B on wire", cls: "" },
+      { i: 3, t: "decap", cls: "" },
+      { i: 4, t: "inner " + model.innerLen + "B", cls: "" },
+    ];
+    pkt.style.opacity = "1";
+    let k = 0;
+    const step = () => {
+      const s = seq[k];
+      pkt.style.left = stops[s.i] + "%";
+      pkt.textContent = s.t;
+      k++;
+      if (k < seq.length) setTimeout(step, reduce ? 250 : 620);
+      else setTimeout(() => { pkt.style.opacity = "0"; animating = false; }, reduce ? 250 : 700);
+    };
+    pkt.style.left = stops[0] + "%";
+    pkt.textContent = seq[0].t;
+    setTimeout(step, 60);
+  }
+  sendBtn.addEventListener("click", sendAnim);
+
+  // init
+  document.querySelector('.preset[data-preset="udp"]').setAttribute("aria-pressed", "true");
+  setProto("udp");
+})();
+</script>
+</body>
+</html>

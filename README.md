@@ -136,6 +136,14 @@ Each crate is small and single-purpose, and the two hardest, most reusable piece
 
 ## Poke at it (no root, no Linux needed)
 
+**Visual playground:** open [`docs/playground.html`](docs/playground.html) in a
+browser (or host it on GitHub Pages) — an interactive tool that builds a tenant
+packet and shows it wrapped in the Andromeda overlay: color-linked layer stack and
+hex dump, live checksums, and the flow hash → outer UDP source port. Its byte-level
+logic is verified to match `andromeda inspect` exactly.
+
+Or from the terminal:
+
 ```
 $ andromeda inspect          # decodes a synthesized overlay packet, layer by layer
 Ethernet  02:00:00:00:a1:01 -> 02:00:00:00:a1:02  ethertype 0x0800 (IPv4)
