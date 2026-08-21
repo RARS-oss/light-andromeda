@@ -1,0 +1,27 @@
+# Multi-VPC fabric: one switch serving several tenants that reuse the SAME private
+# addresses — kept isolated by their VNI. The fabric is keyed by (VNI, inner-IP), so
+# 10.0.0.5 in vpc 100 and 10.0.0.5 in vpc 200 resolve to two different endpoints.
+#
+#   andromeda switch --tenant <if> --underlay <if> --config multi-vpc.example.toml
+
+local_node          = "192.168.1.1"
+peer_node           = "192.168.1.254"
+virtual_gateway_mac = "02:00:00:00:00:ff"
+
+[[vpc]]
+vni  = 100
+cidr = "10.0.0.0/24"
+
+[[vpc.endpoint]]
+inner_ip  = "10.0.0.5"          # tenant A's 10.0.0.5 …
+inner_mac = "aa:bb:cc:00:01:05"
+node_ip   = "192.168.1.2"
+
+[[vpc]]
+vni  = 200
+cidr = "10.0.0.0/24"
+
+[[vpc.endpoint]]
+inner_ip  = "10.0.0.5"          # … a DIFFERENT tenant's 10.0.0.5, isolated by VNI
+inner_mac = "aa:bb:cc:00:02:05"
+node_ip   = "192.168.1.3"

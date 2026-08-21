@@ -83,8 +83,8 @@ poll-mode drivers, huge pages, and NIC offloads this project does not use.
 eBPF *inside* the kernel. Light-Andromeda deliberately explores the userspace side to
 study AF_XDP directly.
 
-**Positioning.** Relative to all of the above this is a single-core, single-VPC,
-IPv4, software-only reimplementation. It contributes no new mechanism; it contributes
+**Positioning.** Relative to all of the above this is a single-core, IPv4,
+software-only reimplementation (multi-VPC in the fabric; single tenant port live). It contributes no new mechanism; it contributes
 a *measured, reproducible characterization* of a clean implementation, and it is
 honest about the regime in which its numbers hold.
 
@@ -258,7 +258,7 @@ zero-copy AF_XDP on a real NIC would close this gap; demonstrating it is future 
 
 ### 6.6 Correctness
 
-41 unit tests cover every parser, checksum path, NAT operation, the fabric and config
+44 unit tests cover every parser, checksum path, NAT operation, the fabric and config
 loader, the pipeline, and proxy-ARP. Checksum invariants are asserted against
 known-good vectors and against full-recompute baselines (the incremental update is
 proven bit-identical). Beyond fixed vectors, **five property-based/fuzz tests**
@@ -304,9 +304,12 @@ in the favorable regime (small hot working set, sequential-ish frame reuse).
 ## 9. Future work
 
 Native-mode, zero-copy AF_XDP on a real NIC with an honest line-rate number and PMU
-data; multi-VPC per switch (VNI by ingress port) and IPv6/ND; MAC learning instead of
-a provisioned table; shared-UMEM zero-copy across both switch ports; and a SIMD /
-vectorized batch stamp — worthwhile only for the compute-bound regime §6.3 identifies.
+data; a live multi-tenant-port switch on top of the multi-VPC fabric (already in
+place: the fabric is keyed by (VNI, inner-IP) and `encap_for_vni` tags each frame, so
+the same inner address in two VPCs is isolated — verified by a unit test); IPv6/ND;
+MAC learning instead of a provisioned table; shared-UMEM zero-copy across both switch
+ports; and a SIMD / vectorized batch stamp — worthwhile only for the compute-bound
+regime §6.3 identifies.
 
 ## 10. Conclusion
 
@@ -321,7 +324,7 @@ breadth of features.
 ## Appendix A. Reproducibility
 
 ```bash
-cargo test --workspace                       # 46 tests
+cargo test --workspace                       # 49 tests
 cargo run -p andromeda-cli --release -- bench          # §6.1 matrix (mean±sd)
 cargo run -p andromeda-cli --release -- bench --sweep  # §6.3 cache experiment
 cargo run -p andromeda-cli --release -- bench --json   # machine-readable

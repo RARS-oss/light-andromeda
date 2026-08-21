@@ -4,7 +4,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-000?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-46%20passing-2f8f5b" alt="tests">
+  <img src="https://img.shields.io/badge/tests-49%20passing-2f8f5b" alt="tests">
   <img src="https://img.shields.io/badge/clippy%20%2B%20fmt-clean-2f8f5b" alt="lint">
   <img src="https://img.shields.io/badge/unsafe-0%20in%20core-2bc4b2" alt="no unsafe in core">
   <img src="https://img.shields.io/badge/license-MIT-0e9c8c" alt="license">
@@ -47,7 +47,7 @@ Ethernet  02:00:00:00:a1:01 -> 02:00:00:00:a1:02  ethertype 0x0800 (IPv4)
           IPv4  10.0.0.10 -> 10.0.0.20  proto 17 (UDP)  ttl 64  cksum ok
 ```
 ```bash
-cargo test --workspace                    # 46 tests
+cargo test --workspace                    # 49 tests
 cargo run -p andromeda-cli -- bench        # performance table (mean ± sd)
 ```
 
@@ -106,6 +106,7 @@ first guess* — the full roofline model and threats to validity are in the
 | **Incremental checksums (RFC 1624)** | Address/port rewrites patch L3+L4 checksums by 16-bit delta — proven bit-identical to a full recompute |
 | **Overlay encapsulation (VPC)** | Custom 8-byte header: 24-bit VNI + flow hash; header templating on the hot path |
 | **SDN control plane** | Fabric map `(VNI, inner-IP) → node + MAC`, from declarative TOML |
+| **Multi-tenancy** | Multiple VPCs per switch, isolated by VNI — the same inner IP in two tenants routes to different endpoints (unit-tested) |
 | **Stateful NAT** | SNAT/PAT with conntrack + a port allocator; DNAT port-forwarding |
 | **Distributed gateway** | Proxy-ARP with one virtual gateway MAC — tenants never learn each other's MACs |
 | **Systems Rust** | `#![forbid(unsafe_code)]` in the core; allocation-free hot path; `unsafe` confined to the FFI |
@@ -156,11 +157,12 @@ Requires a recent stable Rust toolchain; the AF_XDP path needs a Linux kernel wi
 
 **Done:** byte-exact L2/L3/L4 + ARP parsing · Andromeda overlay · incremental
 checksums · SNAT/DNAT + conntrack · SDN fabric + TOML config · proxy-ARP gateway ·
+**multi-VPC (tenant isolation by VNI — same inner IP in two VPCs stays separate)** ·
 AF_XDP datapath · two-node overlay ping · header templating + zero-copy encap ·
-rigorous benchmarks + the cache experiment · 46 tests (incl. property/fuzz), CI, clippy/fmt clean.
+rigorous benchmarks + the cache experiment · 49 tests (incl. property/fuzz), CI, clippy/fmt clean.
 
-**Next:** native-mode zero-copy AF_XDP on a real NIC (with PMU data) · multi-VPC per
-switch · IPv6/ND · MAC learning · shared-UMEM zero-copy across both ports.
+**Next:** native-mode zero-copy AF_XDP on a real NIC (with PMU data) · a live
+multi-tenant-port switch · IPv6/ND · MAC learning · shared-UMEM zero-copy across both ports.
 
 ## Docs
 

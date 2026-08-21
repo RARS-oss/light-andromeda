@@ -23,8 +23,10 @@ use andromeda_core::{arp, five_tuple_of};
 use andromeda_nat::{apply as nat_apply, Direction, NatEngine};
 use std::net::Ipv4Addr;
 
-/// Static configuration for one switch instance (single-VPC MVP; multi-VPC is a
-/// map keyed by ingress port in a later iteration).
+/// Static configuration for one switch instance. `vni` is the *default* VPC used by
+/// [`Pipeline::on_tenant_frame`]; a multi-VPC switch calls
+/// [`Pipeline::encap_for_vni`] with the ingress port's VNI, and decapsulation accepts
+/// any VNI present in the fabric.
 #[derive(Clone, Debug)]
 pub struct PipelineConfig {
     /// This switch's underlay address (outer source IP for encapsulated packets).
@@ -179,12 +181,20 @@ impl Pipeline {
         self.ip_id
     }
 
-    /// Tenant → underlay: resolve, optionally SNAT, encapsulate.
-    ///
-    /// Hot path: one parse of the inner IPv4 header, one copy of the inner frame
-    /// into the output buffer, and the overlay header written in place — no scratch
-    /// buffer and (by default) no outer UDP checksum pass over the payload.
+    /// Tenant → underlay for the switch's configured VNI (single-VPC path).
     pub fn on_tenant_frame(&mut self, inner: &[u8], out: &mut [u8], now: u64) -> Decision {
+        self.encap_for_vni(inner, out, now, self.cfg.vni)
+    }
+
+    /// Tenant → underlay for a specific `vni` (the ingress tenant): resolve within
+    /// that VPC, optionally SNAT, encapsulate. A multi-VPC switch calls this with the
+    /// VNI of the port the frame arrived on. Because the fabric is keyed by
+    /// (VNI, inner-IP), the **same inner address in two VPCs resolves to two different
+    /// endpoints** — that is tenant isolation.
+    ///
+    /// Hot path: one parse of the inner IPv4 header, one copy of the inner frame into
+    /// the output buffer, and the overlay header written in place.
+    pub fn encap_for_vni(&mut self, inner: &[u8], out: &mut [u8], now: u64, vni: u32) -> Decision {
         let eth = match EthFrame::parse(inner) {
             Ok(e) => e,
             Err(_) => return self.drop("bad-inner-eth"),
@@ -219,8 +229,8 @@ impl Pipeline {
         let inner_dst = ip.dst();
         let mut flow = flow_hash_of(&ip);
 
-        // Decide next hop: in-VPC endpoint, or default route to the gateway.
-        let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(self.cfg.vni, inner_dst) {
+        // Decide next hop *within this VNI*, or default route to the gateway.
+        let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(vni, inner_dst) {
             Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
             None => match self.cfg.gateway_node_ip {
                 Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
@@ -259,7 +269,7 @@ impl Pipeline {
 
         // Stamp the precomputed outer header (patch only the variable fields).
         let ip_id = self.next_ip_id();
-        self.stamp_outer(out, inner.len(), dst_node, flow, ip_id);
+        self.stamp_outer(out, inner.len(), dst_node, flow, ip_id, vni);
         self.stats.encapped += 1;
         Decision::Forward(end)
     }
@@ -323,7 +333,7 @@ impl Pipeline {
         }
 
         let ip_id = self.next_ip_id();
-        self.stamp_outer(frame, inner_len, dst_node, flow, ip_id);
+        self.stamp_outer(frame, inner_len, dst_node, flow, ip_id, self.cfg.vni);
         self.stats.encapped += 1;
         Decision::Forward(end)
     }
@@ -387,7 +397,7 @@ impl Pipeline {
             }
 
             ip_id = ip_id.wrapping_add(1);
-            self.stamp_outer(frame, s.inner_len, dst_node, flow, ip_id);
+            self.stamp_outer(frame, s.inner_len, dst_node, flow, ip_id, self.cfg.vni);
             forwarded += 1;
         }
 
@@ -409,6 +419,7 @@ impl Pipeline {
         dst_ip: Ipv4Addr,
         flow: u16,
         ip_id: u16,
+        vni: u32,
     ) {
         use andromeda_core::ipv4::IPV4_MIN_HDR_LEN;
 
@@ -434,8 +445,8 @@ impl Pipeline {
         let udp_len = (8 + overlay::ANDROMEDA_HDR_LEN + inner_len) as u16;
         out[38..40].copy_from_slice(&udp_len.to_be_bytes());
 
-        // Andromeda header.
-        overlay::AndromedaHdr::new(self.cfg.vni, flow).encode(&mut out[42..50]);
+        // Andromeda header (tagged with this frame's VNI).
+        overlay::AndromedaHdr::new(vni, flow).encode(&mut out[42..50]);
 
         // Strict mode (rare): fill the outer UDP checksum over the whole payload.
         if self.cfg.outer_udp_checksum {
@@ -453,7 +464,9 @@ impl Pipeline {
     pub fn on_underlay_frame(&mut self, frame: &[u8], out: &mut [u8], now: u64) -> Decision {
         let (inner_len, is_ipv4) = match overlay::decap(frame) {
             Ok(Some(d)) => {
-                if d.header.vni != self.cfg.vni {
+                // Accept any VNI this switch serves (its configured one, or any VPC
+                // present in the fabric) — a multi-VPC switch decaps them all.
+                if d.header.vni != self.cfg.vni && self.fabric.vpc(d.header.vni).is_none() {
                     return self.drop("wrong-vni");
                 }
                 if out.len() < d.inner.len() {
@@ -565,6 +578,77 @@ mod tests {
         };
         let nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20100);
         Pipeline::new(cfg, fabric, nat)
+    }
+
+    #[test]
+    fn multi_vpc_isolates_same_inner_ip() {
+        // Two tenants that BOTH use 10.0.0.5, on one switch, kept apart by VNI.
+        let mut fabric = Fabric::new("192.168.1.1".parse().unwrap());
+        for (vni, mac_n, node) in [(100u32, 0x11u8, "192.168.1.2"), (200, 0x22, "192.168.1.3")] {
+            fabric.add_vpc(Vpc {
+                vni,
+                name: format!("vpc-{vni}"),
+                cidr: ("10.0.0.0".parse().unwrap(), 24),
+            });
+            fabric.add_endpoint(Endpoint {
+                vni,
+                inner_ip: "10.0.0.5".parse().unwrap(),
+                inner_mac: mac(mac_n),
+                node_ip: node.parse().unwrap(),
+                local: false,
+            });
+        }
+        let cfg = PipelineConfig {
+            local_node_ip: "192.168.1.1".parse().unwrap(),
+            outer_src_mac: mac(0x01),
+            outer_dst_mac: mac(0x02),
+            vni: 100,
+            nat_ip: None,
+            gateway_node_ip: None,
+            virtual_gateway_mac: mac(0xff),
+            outer_udp_checksum: false,
+        };
+        let mut p = Pipeline::new(
+            cfg,
+            fabric,
+            NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20100),
+        );
+
+        // Same inner packet to 10.0.0.5, encapsulated for two different tenants.
+        let frame = tenant_udp_frame("10.0.0.9", "10.0.0.5", 1111, 2222, b"iso");
+        let mut w1 = vec![0u8; 2048];
+        let n1 = match p.encap_for_vni(&frame, &mut w1, 1, 100) {
+            Decision::Forward(n) => n,
+            o => panic!("vni100: {o:?}"),
+        };
+        let mut w2 = vec![0u8; 2048];
+        let n2 = match p.encap_for_vni(&frame, &mut w2, 1, 200) {
+            Decision::Forward(n) => n,
+            o => panic!("vni200: {o:?}"),
+        };
+
+        let d1 = overlay::decap(&w1[..n1]).unwrap().unwrap();
+        let d2 = overlay::decap(&w2[..n2]).unwrap().unwrap();
+
+        // Different VNI on the wire, different physical node, different inner MAC —
+        // the same tenant IP goes to two isolated places.
+        assert_eq!(d1.header.vni, 100);
+        assert_eq!(d2.header.vni, 200);
+        assert_eq!(d1.outer_dst_ip, "192.168.1.2".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(d2.outer_dst_ip, "192.168.1.3".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(EthFrame::parse(d1.inner).unwrap().dst(), mac(0x11));
+        assert_eq!(EthFrame::parse(d2.inner).unwrap().dst(), mac(0x22));
+
+        // The switch decaps both served VNIs, but drops an unknown one.
+        let mut deliver = vec![0u8; 2048];
+        assert!(matches!(
+            p.on_underlay_frame(&w1[..n1], &mut deliver, 1),
+            Decision::Forward(_)
+        ));
+        assert!(matches!(
+            p.on_underlay_frame(&w2[..n2], &mut deliver, 1),
+            Decision::Forward(_)
+        ));
     }
 
     #[test]
