@@ -14,6 +14,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("selftest") => selftest(),
+        Some("bench") => bench_cmd(&args[2..]),
         Some("run") => run_cmd(&args[2..]),
         Some("switch") => switch_cmd(&args[2..]),
         Some("version") | Some("--version") | None => print_version(),
@@ -35,7 +36,9 @@ fn print_help() {
         "andromeda — Light-Andromeda switch\n\n\
          USAGE:\n  \
            andromeda selftest\n  \
-           andromeda run <iface> [options]\n\n\
+           andromeda bench [iterations]\n  \
+           andromeda run <iface> [options]\n  \
+           andromeda switch --tenant <if> --underlay <if> [options]\n\n\
          run options:\n  \
            --queue <n>         RX/TX queue id (default 0)\n  \
            --mode <m>          dump | encap | decap (default dump)\n  \
@@ -100,6 +103,111 @@ fn demo_frame(src: &str, dst: &str) -> Vec<u8> {
     ipv4::write_header(&mut ip[..20], src, dst, proto::UDP, 64, 1, true, dg.len() as u16);
     ip[20..].copy_from_slice(&dg);
 
+    let mut frame = vec![0u8; ethernet::ETH_HDR_LEN + ip.len()];
+    ethernet::write_header(
+        &mut frame[..14],
+        MacAddr([0x02, 0, 0, 0, 0, 0x0b]),
+        MacAddr([0x02, 0, 0, 0, 0, 0x0a]),
+        ethernet::ethertype::IPV4,
+    );
+    frame[14..].copy_from_slice(&ip);
+    frame
+}
+
+// ---- bench subcommand -----------------------------------------------------
+
+/// Micro-benchmark the forwarding core (no sockets): how fast can one core parse,
+/// (optionally) SNAT, and Andromeda-encapsulate a packet? Pure logic, no root.
+fn bench_cmd(args: &[String]) {
+    use andromeda_dataplane::Decision;
+
+    let iters: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+
+    for &payload_len in &[18usize, 1354usize] {
+        // 18 -> ~64B inner frame; 1354 -> ~1400B inner frame.
+        let frame = udp_tenant_frame("10.0.0.10", "10.0.0.20", 40000, 4242, payload_len);
+        let inner_len = frame.len();
+
+        // east-west encap: destination is a known endpoint (no NAT).
+        let mut ew = build_pipeline(true, false);
+        // egress + SNAT: destination outside the VPC, gateway + nat configured.
+        let mut nat = build_pipeline(false, true);
+
+        let mut out = vec![0u8; 2048];
+
+        let ew_ns = time_loop(iters, || {
+            matches!(ew.on_tenant_frame(&frame, &mut out, 0), Decision::Forward(_))
+        });
+        let nat_ns = time_loop(iters, || {
+            matches!(nat.on_tenant_frame(&frame, &mut out, 0), Decision::Forward(_))
+        });
+
+        println!("\ninner frame = {inner_len} bytes  ({iters} iterations)");
+        report("encap (east-west)", ew_ns, iters, inner_len);
+        report("encap + SNAT (egress)", nat_ns, iters, inner_len);
+    }
+}
+
+fn time_loop<F: FnMut() -> bool>(iters: u64, mut f: F) -> u64 {
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let mut ok = 0u64;
+    for _ in 0..iters {
+        if f() {
+            ok += 1;
+        }
+    }
+    // Guard against the optimizer eliding the loop.
+    std::hint::black_box(ok);
+    t0.elapsed().as_nanos() as u64
+}
+
+fn report(label: &str, total_ns: u64, iters: u64, inner_len: usize) {
+    let ns_per = total_ns as f64 / iters as f64;
+    let mpps = 1000.0 / ns_per; // 1e9/ns_per packets/s, expressed in Mpps
+    // Throughput of the encapsulated wire bytes.
+    let wire = inner_len as f64 + 50.0; // overlay overhead
+    let gbps = mpps * 1e6 * wire * 8.0 / 1e9;
+    println!("  {label:<24} {ns_per:6.1} ns/pkt   {mpps:6.2} Mpps   {gbps:6.2} Gbit/s (wire)");
+}
+
+fn build_pipeline(east_west: bool, snat: bool) -> Pipeline {
+    let mut fabric = Fabric::new("192.168.1.1".parse().unwrap());
+    fabric.add_vpc(Vpc { vni: 100, name: "b".into(), cidr: ("10.0.0.0".parse().unwrap(), 24) });
+    if east_west {
+        fabric.add_endpoint(Endpoint {
+            vni: 100,
+            inner_ip: "10.0.0.20".parse().unwrap(),
+            inner_mac: MacAddr([0x02, 0, 0, 0, 0, 0x20]),
+            node_ip: "192.168.1.2".parse().unwrap(),
+            local: false,
+        });
+    }
+    let cfg = PipelineConfig {
+        local_node_ip: "192.168.1.1".parse().unwrap(),
+        outer_src_mac: MacAddr([0x02, 0, 0, 0, 0, 0x01]),
+        outer_dst_mac: MacAddr([0x02, 0, 0, 0, 0, 0x02]),
+        vni: 100,
+        nat_ip: if snat { Some("203.0.113.7".parse().unwrap()) } else { None },
+        gateway_node_ip: if snat { Some("192.168.1.254".parse().unwrap()) } else { None },
+    };
+    Pipeline::new(cfg, fabric, NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 60000))
+}
+
+fn udp_tenant_frame(src: &str, dst: &str, sp: u16, dp: u16, payload_len: usize) -> Vec<u8> {
+    use andromeda_core::ipv4::{self, proto};
+    use andromeda_core::udp;
+    let src: Ipv4Addr = src.parse().unwrap();
+    let dst: Ipv4Addr = dst.parse().unwrap();
+    let payload = vec![0xabu8; payload_len];
+    let mut dg = vec![0u8; udp::UDP_HDR_LEN + payload.len()];
+    udp::write_header(&mut dg, sp, dp, payload.len() as u16);
+    dg[udp::UDP_HDR_LEN..].copy_from_slice(&payload);
+    let c = udp::compute_checksum(src, dst, &dg);
+    dg[6..8].copy_from_slice(&c.to_be_bytes());
+    let mut ip = vec![0u8; ipv4::IPV4_MIN_HDR_LEN + dg.len()];
+    ipv4::write_header(&mut ip[..20], src, dst, proto::UDP, 64, 1, true, dg.len() as u16);
+    ip[20..].copy_from_slice(&dg);
     let mut frame = vec![0u8; ethernet::ETH_HDR_LEN + ip.len()];
     ethernet::write_header(
         &mut frame[..14],

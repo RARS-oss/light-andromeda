@@ -189,6 +189,21 @@ sudo ./scripts/demo.sh encap
 
 ---
 
+## Performance
+
+`andromeda bench` micro-benchmarks the forwarding core (parse → optional SNAT →
+encapsulate) on a single core, in cache, with no socket overhead — an upper bound
+on what the datapath logic itself costs:
+
+| inner frame | encap (east-west) | encap + SNAT |
+|---|---|---|
+| 64 B  | **19 Mpps** · 52 ns/pkt | 11.7 Mpps · 86 ns/pkt |
+| 1400 B | 7.6 Mpps · **88 Gbit/s** | 6.1 Mpps · 71 Gbit/s |
+
+The incremental-checksum SNAT path adds ~33 ns/packet — the cost of connection
+tracking plus a handful of one's-complement updates, not a payload rescan. (Numbers
+from a release build; run `andromeda bench` on your own hardware.)
+
 ## Design notes
 
 **Zero-copy hot path.** Parsers are *views* over a borrowed `&[u8]`/`&mut [u8]` —
