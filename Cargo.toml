@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-handle/light-andromeda"
+repository = "https://github.com/RARS-oss/light-andromeda"
 description = "Light-Andromeda: a user-space, kernel-bypass network virtualization dataplane (VPC overlay + NAT) in the spirit of Google Andromeda"
 
 [workspace.dependencies]
