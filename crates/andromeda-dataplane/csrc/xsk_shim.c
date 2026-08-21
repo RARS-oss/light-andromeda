@@ -51,8 +51,10 @@ struct andro_xsk *andro_xsk_open(const char *ifname, uint32_t queue_id,
     x->n_frames = n_frames;
 
     uint64_t area_sz = (uint64_t)n_frames * frame_size;
-    if (posix_memalign(&x->area, getpagesize(), area_sz)) {
-        if (out_err) *out_err = errno; free(x); return NULL;
+    // posix_memalign returns the error code directly and does NOT set errno.
+    int rc = posix_memalign(&x->area, getpagesize(), area_sz);
+    if (rc) {
+        if (out_err) *out_err = rc; free(x); return NULL;
     }
     memset(x->area, 0, area_sz);
 
@@ -119,10 +121,20 @@ uint32_t andro_fq_push(struct andro_xsk *x, const uint64_t *addrs, uint32_t n) {
 uint32_t andro_rx_peek(struct andro_xsk *x, uint64_t *addrs, uint32_t *lens, uint32_t max) {
     uint32_t idx = 0;
     uint32_t got = xsk_ring_cons__peek(&x->rx, max, &idx);
+    uint64_t area_sz = (uint64_t)x->n_frames * x->frame_size;
     for (uint32_t i = 0; i < got; i++) {
         const struct xdp_desc *d = xsk_ring_cons__rx_desc(&x->rx, idx + i);
-        addrs[i] = d->addr;
-        lens[i] = d->len;
+        uint64_t a = d->addr;
+        uint32_t l = d->len;
+        // Defense-in-depth: never let a descriptor address/length escape the UMEM.
+        // Under XDP_COPY the kernel already bounds these, but a native/multi-buffer
+        // driver could deliver a larger len; clamping keeps the Rust slice inside the
+        // frame slot (no OOB read, no aliasing with a TX frame).
+        if (a >= area_sz) { a = 0; l = 0; }
+        if (l > x->frame_size) l = x->frame_size;
+        if (a + l > area_sz) l = (uint32_t)(area_sz - a);
+        addrs[i] = a;
+        lens[i] = l;
     }
     if (got) xsk_ring_cons__release(&x->rx, got);
     return got;

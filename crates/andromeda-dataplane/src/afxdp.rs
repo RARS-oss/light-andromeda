@@ -166,9 +166,20 @@ impl XskSocket {
     }
 
     /// Fetch a burst of received frames as (addr, len) pairs.
+    ///
+    /// The C shim already bounds each descriptor to the UMEM; we clamp `len` to the
+    /// frame size again here so a length never exceeds the frame slot even if the FFI
+    /// contract were violated — the raw-slice views in the forwarding loop rely on it.
     pub fn rx_burst(&mut self, addrs: &mut [u64], lens: &mut [u32]) -> usize {
         let max = addrs.len().min(lens.len()) as c_uint;
-        unsafe { andro_rx_peek(self.ptr, addrs.as_mut_ptr(), lens.as_mut_ptr(), max) as usize }
+        let n =
+            unsafe { andro_rx_peek(self.ptr, addrs.as_mut_ptr(), lens.as_mut_ptr(), max) as usize };
+        for l in &mut lens[..n] {
+            if *l > self.frame_size {
+                *l = self.frame_size;
+            }
+        }
+        n
     }
 
     /// Immutable view of a frame's bytes.

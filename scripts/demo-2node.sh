@@ -25,7 +25,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 
-S1=""; S2=""
+S1=""; S2=""; WORK=""
 cleanup() {
     [[ -n "$S1" ]] && kill -INT "$S1" 2>/dev/null
     [[ -n "$S2" ]] && kill -INT "$S2" 2>/dev/null
@@ -35,10 +35,12 @@ cleanup() {
     ip link del t1b 2>/dev/null || true
     ip link del t2b 2>/dev/null || true
     ip link del u1 2>/dev/null || true
-    rm -f /tmp/andromeda-node1.toml /tmp/andromeda-node2.toml
+    [[ -n "$WORK" ]] && rm -rf "$WORK"
 }
 trap cleanup EXIT
 cleanup
+# Private, 0700, symlink-safe scratch dir for configs and logs (root runs this).
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/andromeda.XXXXXX")"
 
 # --- topology: two tenants + an underlay link, all veths ---
 ip netns add t1
@@ -86,14 +88,14 @@ inner_mac = "$T2AMAC"
 node_ip   = "192.168.1.2"
 CFG
 }
-gen_cfg 192.168.1.1 192.168.1.2 > /tmp/andromeda-node1.toml
-gen_cfg 192.168.1.2 192.168.1.1 > /tmp/andromeda-node2.toml
+gen_cfg 192.168.1.1 192.168.1.2 > "$WORK/node1.toml"
+gen_cfg 192.168.1.2 192.168.1.1 > "$WORK/node2.toml"
 
 echo "== starting node 1 switch (t1b <-> u1) =="
-"$BIN" switch --tenant t1b --underlay u1 --config /tmp/andromeda-node1.toml --skb --secs 15 >/tmp/andromeda-sw1.log 2>&1 &
+"$BIN" switch --tenant t1b --underlay u1 --config "$WORK/node1.toml" --skb --secs 15 >"$WORK/sw1.log" 2>&1 &
 S1=$!
 echo "== starting node 2 switch (t2b <-> u2) =="
-"$BIN" switch --tenant t2b --underlay u2 --config /tmp/andromeda-node2.toml --skb --secs 15 >/tmp/andromeda-sw2.log 2>&1 &
+"$BIN" switch --tenant t2b --underlay u2 --config "$WORK/node2.toml" --skb --secs 15 >"$WORK/sw2.log" 2>&1 &
 S2=$!
 sleep 2.5
 
@@ -102,5 +104,5 @@ ip netns exec t1 ping -c 4 -i 0.5 -W 2 10.0.0.20
 RC=$?
 
 kill -INT "$S1" "$S2" 2>/dev/null; sleep 0.4
-echo "== node 1 (live stats) =="; grep -vE 'libbpf:|libxdp:' /tmp/andromeda-sw1.log | tail -6
+echo "== node 1 (live stats) =="; grep -vE 'libbpf:|libxdp:' "$WORK/sw1.log" | tail -6
 exit $RC

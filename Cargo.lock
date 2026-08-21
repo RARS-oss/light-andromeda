@@ -39,6 +39,7 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
+ "proptest",
 ]
 
 [[package]]
@@ -46,6 +47,7 @@ name = "andromeda-nat"
 version = "0.1.0"
 dependencies = [
  "andromeda-core",
+ "proptest",
 ]
 
 [[package]]

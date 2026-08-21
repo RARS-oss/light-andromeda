@@ -224,6 +224,12 @@ impl NatEngine {
                 .copied()
             {
                 // Install the reverse binding so the server's reply is un-DNAT'd.
+                // Unlike the SNAT path (self-limited by the port pool), the DNAT
+                // reverse table is keyed by the *source* 5-tuple, so spoofed inbound
+                // packets from many sources could grow it without bound. Cap it: when
+                // full, still forward the packet but skip reverse-tracking rather than
+                // exhaust memory (a legitimate flow can re-establish after `gc`).
+                const MAX_DNAT_BINDINGS: usize = 1 << 16;
                 let server_reply = FiveTuple {
                     src_ip: rule.to_ip,
                     dst_ip: tuple.src_ip,
@@ -231,15 +237,17 @@ impl NatEngine {
                     src_port: rule.to_port,
                     dst_port: tuple.src_port,
                 };
-                self.dnat_rev.insert(
-                    server_reply,
-                    Binding {
-                        ip: self.nat_ip,
-                        port: rule.ext_port,
-                        last_seen: now,
-                    },
-                );
-                self.stats.dnat_created += 1;
+                if self.dnat_rev.len() < MAX_DNAT_BINDINGS {
+                    self.dnat_rev.insert(
+                        server_reply,
+                        Binding {
+                            ip: self.nat_ip,
+                            port: rule.ext_port,
+                            last_seen: now,
+                        },
+                    );
+                    self.stats.dnat_created += 1;
+                }
                 return Rewrite {
                     new_dst_ip: Some(rule.to_ip),
                     new_dst_port: Some(rule.to_port),

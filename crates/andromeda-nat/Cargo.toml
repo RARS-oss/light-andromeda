@@ -7,3 +7,6 @@ description = "Stateful SNAT/PAT + DNAT with connection tracking, built on andro
 
 [dependencies]
 andromeda-core = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

@@ -195,6 +195,14 @@ pub fn encap_in_place(
             got: out.len(),
         });
     }
+    // The outer IPv4 total-length and UDP length are 16-bit; an inner frame this
+    // large can't be represented (and can never occur on the datapath, where the
+    // out buffer bounds inner_len far below this). Guard future callers.
+    debug_assert!(
+        inner_len
+            <= u16::MAX as usize - (ipv4::IPV4_MIN_HDR_LEN + udp::UDP_HDR_LEN + ANDROMEDA_HDR_LEN),
+        "inner frame too large to encapsulate (would overflow the 16-bit outer length)"
+    );
 
     let eth_end = ethernet::ETH_HDR_LEN;
     let ip_end = eth_end + ipv4::IPV4_MIN_HDR_LEN;

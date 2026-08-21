@@ -261,12 +261,14 @@ zero-copy AF_XDP on a real NIC would close this gap; demonstrating it is future 
 44 unit tests cover every parser, checksum path, NAT operation, the fabric and config
 loader, the pipeline, and proxy-ARP. Checksum invariants are asserted against
 known-good vectors and against full-recompute baselines (the incremental update is
-proven bit-identical). Beyond fixed vectors, **five property-based/fuzz tests**
+proven bit-identical). Beyond fixed vectors, **eight property-based/fuzz tests**
 (`proptest`, thousands of generated cases with shrinking) assert the invariants over a
 wide input space: no parser panics on arbitrary bytes, `decap(encap(x)) == x` for any
 payload and header values, the Andromeda header round-trips, the incremental checksum
-equals a full recompute for any word change, and an SNAT-style address rewrite keeps
-the IPv4 checksum valid for any addresses. Two further checks: **(a)** the browser
+equals a full recompute for any word change, an SNAT-style address rewrite keeps the
+IPv4 checksum valid for any addresses, and — added after a security audit (§8) —
+**every pipeline entry point and the NAT `apply` path are fuzzed with random frames**
+and never panic. Two further checks: **(a)** the browser
 playground re-implements the byte assembly in JavaScript and a packet it builds decodes
 **byte-for-byte identically** under the Rust decoder (two independent implementations
 agreeing on the wire format); **(b)** the copy and zero-copy encap paths are asserted
@@ -324,7 +326,7 @@ breadth of features.
 ## Appendix A. Reproducibility
 
 ```bash
-cargo test --workspace                       # 49 tests
+cargo test --workspace                       # 52 tests
 cargo run -p andromeda-cli --release -- bench          # §6.1 matrix (mean±sd)
 cargo run -p andromeda-cli --release -- bench --sweep  # §6.3 cache experiment
 cargo run -p andromeda-cli --release -- bench --json   # machine-readable
