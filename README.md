@@ -16,8 +16,8 @@
 </p>
 
 <p align="center">
-  📄 <a href="docs/report.html">Technical report</a> &nbsp;·&nbsp;
-  🧪 <a href="docs/playground.html">Packet playground</a> &nbsp;·&nbsp;
+  📄 <a href="https://rars-oss.github.io/light-andromeda/report.html">Technical report</a> &nbsp;·&nbsp;
+  🧪 <a href="https://rars-oss.github.io/light-andromeda/playground.html">Packet playground</a> &nbsp;·&nbsp;
   📘 <a href="docs/REPORT.md">Full write-up</a>
 </p>
 
@@ -123,7 +123,7 @@ crates/
 
 ## Try the interactive playground
 
-**[`docs/playground.html`](docs/playground.html)** — build a tenant packet in your
+**[`https://rars-oss.github.io/light-andromeda/playground.html`](https://rars-oss.github.io/light-andromeda/playground.html)** — build a tenant packet in your
 browser and watch it get wrapped in the overlay: a color-linked layer stack and hex
 dump (hover a layer to light up its bytes), live checksums, and the flow hash. Its
 JavaScript byte-assembly is **verified to produce packets that `andromeda inspect`
@@ -163,9 +163,9 @@ switch · IPv6/ND · MAC learning · shared-UMEM zero-copy across both ports.
 
 ## Docs
 
-- **[Technical report (visual)](docs/report.html)** — the story with charts
+- **[Technical report (visual)](https://rars-oss.github.io/light-andromeda/report.html)** — the story with charts
 - **[Technical report (Markdown)](docs/REPORT.md)** — abstract, related work, methodology, evaluation, roofline, threats to validity, references
-- **[Packet playground](docs/playground.html)** — interactive overlay builder
+- **[Packet playground](https://rars-oss.github.io/light-andromeda/playground.html)** — interactive overlay builder
 - **[Architecture notes](docs/ARCHITECTURE.md)** — the packet walk
 
 ## Contributing & license

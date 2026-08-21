@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Light-Andromeda</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 32px;
+    background: radial-gradient(1200px 600px at 50% -10%, #12312c 0%, #0c1517 55%, #0a1113 100%);
+    color: #dbe7e7; font-family: "IBM Plex Sans", system-ui, sans-serif; }
+  .card { max-width: 720px; width: 100%; }
+  .kick { font-family: "IBM Plex Mono", monospace; font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: #2bc4b2; margin: 0 0 12px; }
+  h1 { font-size: clamp(32px, 6vw, 52px); font-weight: 700; letter-spacing: -0.02em; margin: 0 0 12px; }
+  p.lede { color: #9fb4ba; font-size: 18px; margin: 0 0 30px; max-width: 60ch; line-height: 1.55; }
+  .links { display: flex; flex-wrap: wrap; gap: 12px; }
+  a.btn { text-decoration: none; border-radius: 12px; padding: 16px 20px; display: flex; flex-direction: column; gap: 3px;
+    border: 1px solid #26383c; background: #101d20; color: #dbe7e7; min-width: 200px; transition: border-color .15s, transform .1s; }
+  a.btn:hover { border-color: #2bc4b2; transform: translateY(-2px); }
+  a.btn b { font-size: 16px; }
+  a.btn span { color: #7f959b; font-size: 13px; }
+  a.btn.hero { background: linear-gradient(135deg, #103029, #0e2723); border-color: #1f5148; }
+  a.btn.hero b { color: #63e0cf; }
+  .repo { margin-top: 26px; font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+  .repo a { color: #2bc4b2; }
+  footer { margin-top: 34px; color: #64777d; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <p class="kick">Rust · AF_XDP · SDN overlay dataplane</p>
+    <h1>Light-Andromeda</h1>
+    <p class="lede">A user-space, kernel-bypass VPC overlay — a miniature of the SDN layer cloud providers run under every VM. A real ping travels through it.</p>
+    <div class="links">
+      <a class="btn hero" href="report.html"><b>📄 Technical report →</b><span>design, the 19→80 Mpps story, the cache experiment</span></a>
+      <a class="btn" href="playground.html"><b>🧪 Packet playground →</b><span>build a packet, watch it get encapsulated</span></a>
+    </div>
+    <p class="repo">→ source & docs: <a href="https://github.com/RARS-oss/light-andromeda">github.com/RARS-oss/light-andromeda</a></p>
+    <footer>Built to understand how cloud networks really work — at the level a host actually operates.</footer>
+  </div>
+</body>
+</html>
