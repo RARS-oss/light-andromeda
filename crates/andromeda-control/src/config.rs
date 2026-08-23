@@ -43,8 +43,10 @@ struct RawConfig {
     peer_node: Option<String>,
     vni: Option<u32>,
     virtual_gateway_mac: Option<String>,
+    virtual_gateway_ip: Option<String>,
     nat_ip: Option<String>,
     vpc_cidr: Option<String>,
+    underlay_mtu: Option<u16>,
     #[serde(default, rename = "endpoint")]
     endpoints: Vec<RawEndpoint>,
     #[serde(default, rename = "vpc")]
@@ -84,8 +86,13 @@ pub struct NodeConfig {
     /// Primary VNI (the first VPC) — used by the single-VPC switch path.
     pub vni: u32,
     pub virtual_gateway_mac: MacAddr,
+    /// The inner gateway IP the switch sources PMTUD/ICMP replies from. Defaults to the
+    /// first host (`.1`) of the primary VPC's CIDR.
+    pub virtual_gateway_ip: Ipv4Addr,
     pub nat_ip: Option<Ipv4Addr>,
     pub vpc_cidr: (Ipv4Addr, u8),
+    /// Underlay path MTU in bytes (default 1500), used for overlay PMTUD.
+    pub underlay_mtu: u16,
     /// All endpoints across all VPCs (the fabric is keyed by (VNI, inner-IP)).
     pub endpoints: Vec<Endpoint>,
     /// Every VPC this node serves.
@@ -149,6 +156,20 @@ impl NodeConfig {
 
         let primary_vni = vpcs[0].vni;
         let vpc_cidr = vpcs[0].cidr;
+
+        let virtual_gateway_ip = match raw.virtual_gateway_ip.as_deref() {
+            Some(s) => parse_ip(s, "virtual_gateway_ip")?,
+            // Default: the first host (.1) of the primary VPC network.
+            None => Ipv4Addr::from(u32::from(vpc_cidr.0) | 1),
+        };
+        let underlay_mtu = raw.underlay_mtu.unwrap_or(1500);
+        if (underlay_mtu as usize) <= andromeda_core::overlay::OVERLAY_OVERHEAD {
+            return Err(ConfigError(format!(
+                "underlay_mtu {underlay_mtu} too small (must exceed the {}-byte overlay header)",
+                andromeda_core::overlay::OVERLAY_OVERHEAD
+            )));
+        }
+
         let endpoints: Vec<Endpoint> = vpcs
             .iter()
             .flat_map(|v| v.endpoints.iter().copied())
@@ -159,8 +180,10 @@ impl NodeConfig {
             peer_node,
             vni: primary_vni,
             virtual_gateway_mac,
+            virtual_gateway_ip,
             nat_ip,
             vpc_cidr,
+            underlay_mtu,
             endpoints,
             vpcs,
         })
@@ -344,6 +367,38 @@ mod tests {
         assert!(c.peer_node.is_none());
         assert!(c.endpoints.is_empty());
         assert_eq!(c.vpc_cidr.1, 0);
+        assert_eq!(c.underlay_mtu, 1500);
+    }
+
+    #[test]
+    fn parses_mtu_and_gateway_ip() {
+        // Explicit values from TOML.
+        let c = NodeConfig::parse(
+            "local_node = \"192.168.1.1\"\nvni = 5\nvpc_cidr = \"10.9.0.0/24\"\nunderlay_mtu = 9000\nvirtual_gateway_ip = \"10.9.0.254\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.underlay_mtu, 9000);
+        assert_eq!(
+            c.virtual_gateway_ip,
+            "10.9.0.254".parse::<Ipv4Addr>().unwrap()
+        );
+
+        // Defaults: 1500 MTU, gateway = the .1 host of the primary CIDR.
+        let d = NodeConfig::parse(
+            "local_node = \"192.168.1.1\"\nvni = 5\nvpc_cidr = \"10.9.0.0/24\"\n",
+        )
+        .unwrap();
+        assert_eq!(d.underlay_mtu, 1500);
+        assert_eq!(
+            d.virtual_gateway_ip,
+            "10.9.0.1".parse::<Ipv4Addr>().unwrap()
+        );
+
+        // A too-small underlay MTU is rejected.
+        assert!(
+            NodeConfig::parse("local_node = \"192.168.1.1\"\nvni = 5\nunderlay_mtu = 20\n")
+                .is_err()
+        );
     }
 
     #[test]

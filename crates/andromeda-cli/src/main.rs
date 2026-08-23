@@ -885,8 +885,8 @@ fn switch_cmd(args: &[String]) {
             gateway_node_ip: nc.peer_node,
             virtual_gateway_mac: nc.virtual_gateway_mac,
             outer_udp_checksum: false,
-            underlay_mtu: 1500,
-            virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
+            underlay_mtu: nc.underlay_mtu,
+            virtual_gateway_ip: nc.virtual_gateway_ip,
         };
         let nat = NatEngine::new(nc.nat_ip.unwrap_or(nc.local_node), 20000, 60000);
         (nc.build_fabric(), cfg, nat)

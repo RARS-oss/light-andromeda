@@ -334,7 +334,7 @@ impl Pipeline {
         }
 
         // Parse the inner header in place.
-        let (inner_dst, flow0) = {
+        let (inner_dst, flow0, df, total_len) = {
             let eth = match EthFrame::parse(&frame[ioff..end]) {
                 Ok(e) => e,
                 Err(_) => return self.drop("bad-inner-eth"),
@@ -343,11 +343,41 @@ impl Pipeline {
                 return self.drop("non-ipv4-inner");
             }
             match Ipv4View::parse(eth.payload()) {
-                Ok(ip) => (ip.dst(), flow_hash_of(&ip)),
+                Ok(ip) => (
+                    ip.dst(),
+                    flow_hash_of(&ip),
+                    ip.dont_fragment(),
+                    ip.total_length(),
+                ),
                 Err(_) => return self.drop("bad-inner-ip"),
             }
         };
         let mut flow = flow0;
+
+        // Overlay PMTUD (same rule as the copy path): a DF datagram that won't fit under
+        // the overlay header gets an ICMP reply instead of an oversize forwarded frame.
+        let inner_mtu = self
+            .cfg
+            .underlay_mtu
+            .saturating_sub(overlay::OVERLAY_OVERHEAD as u16);
+        if df && total_len > inner_mtu {
+            // Rare path (oversize DF): copy the inner frame out so the ICMP can be written
+            // back into this buffer without aliasing. The hot path never allocates.
+            let orig = frame[ioff..end].to_vec();
+            return match icmp::write_frag_needed(
+                frame,
+                &orig,
+                self.cfg.virtual_gateway_mac,
+                self.cfg.virtual_gateway_ip,
+                inner_mtu,
+            ) {
+                Ok(n) => {
+                    self.stats.pmtud_replied += 1;
+                    Decision::Reply(n)
+                }
+                Err(_) => self.drop("pmtud-build"),
+            };
+        }
 
         let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(self.cfg.vni, inner_dst) {
             Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
@@ -387,9 +417,14 @@ impl Pipeline {
     /// across independent frames. Returns the number of frames encapsulated.
     pub fn encap_batch_inplace(&mut self, buf: &mut [u8], slots: &[FrameSlot], now: u64) -> usize {
         let ioff = overlay::OVERLAY_OVERHEAD;
+        let inner_mtu = self
+            .cfg
+            .underlay_mtu
+            .saturating_sub(overlay::OVERLAY_OVERHEAD as u16);
         let mut ip_id = self.ip_id;
         let mut forwarded = 0u64;
         let mut natted = 0u64;
+        let mut mtu_dropped = 0u64;
 
         for s in slots {
             let end = s.offset + ioff + s.inner_len;
@@ -398,7 +433,7 @@ impl Pipeline {
             }
             let frame = &mut buf[s.offset..end];
 
-            let (inner_dst, mut flow) = {
+            let (inner_dst, mut flow, df, total_len) = {
                 let eth = match EthFrame::parse(&frame[ioff..]) {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -407,10 +442,22 @@ impl Pipeline {
                     continue;
                 }
                 match Ipv4View::parse(eth.payload()) {
-                    Ok(ip) => (ip.dst(), flow_hash_of(&ip)),
+                    Ok(ip) => (
+                        ip.dst(),
+                        flow_hash_of(&ip),
+                        ip.dont_fragment(),
+                        ip.total_length(),
+                    ),
                     Err(_) => continue,
                 }
             };
+
+            // Overlay PMTUD: never emit an oversize DF frame. The batch path can't send an
+            // ICMP reply per frame, so it drops+counts; the per-frame paths reply with ICMP.
+            if df && total_len > inner_mtu {
+                mtu_dropped += 1;
+                continue;
+            }
 
             let (dst_node, new_dst_mac, do_snat) =
                 match self.fabric.resolve(self.cfg.vni, inner_dst) {
@@ -446,6 +493,7 @@ impl Pipeline {
         self.ip_id = ip_id;
         self.stats.encapped += forwarded;
         self.stats.natted += natted;
+        self.stats.dropped += mtu_dropped;
         forwarded as usize
     }
 
@@ -685,6 +733,27 @@ mod tests {
             Decision::Forward(_)
         ));
         assert_eq!(p.stats().pmtud_replied, 0);
+    }
+
+    #[test]
+    fn pmtud_inplace_oversize_df_replies_with_icmp() {
+        let mut p = two_node_pipeline();
+        // The zero-copy in-place path must also PMTUD, not emit an oversize frame.
+        let inner = tenant_udp_frame("10.0.0.9", "10.0.0.20", 1111, 2222, &vec![0x41u8; 1500]);
+        let ioff = overlay::OVERLAY_OVERHEAD;
+        let mut buf = vec![0u8; ioff + inner.len() + 64];
+        buf[ioff..ioff + inner.len()].copy_from_slice(&inner);
+        let n = match p.on_tenant_frame_inplace(&mut buf, inner.len(), 1) {
+            Decision::Reply(n) => n,
+            o => panic!("expected ICMP Reply, got {o:?}"),
+        };
+        assert_eq!(p.stats().pmtud_replied, 1);
+        assert_eq!(p.stats().encapped, 0);
+        let eth = EthFrame::parse(&buf[..n]).unwrap();
+        let ip = Ipv4View::parse(eth.payload()).unwrap();
+        assert_eq!(ip.protocol(), proto::ICMP);
+        assert!(ip.checksum_valid());
+        assert_eq!(u16::from_be_bytes([ip.payload()[6], ip.payload()[7]]), 1450);
     }
 
     #[test]
