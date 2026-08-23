@@ -326,7 +326,7 @@ breadth of features.
 ## Appendix A. Reproducibility
 
 ```bash
-cargo test --workspace                       # 52 tests
+cargo test --workspace                       # 68 tests
 cargo run -p andromeda-cli --release -- bench          # §6.1 matrix (mean±sd)
 cargo run -p andromeda-cli --release -- bench --sweep  # §6.3 cache experiment
 cargo run -p andromeda-cli --release -- bench --json   # machine-readable

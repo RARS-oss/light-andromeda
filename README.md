@@ -4,7 +4,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-000?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-52%20passing-2f8f5b" alt="tests">
+  <img src="https://img.shields.io/badge/tests-68%20passing-2f8f5b" alt="tests">
   <img src="https://img.shields.io/badge/clippy%20%2B%20fmt-clean-2f8f5b" alt="lint">
   <img src="https://img.shields.io/badge/unsafe-0%20in%20core-2bc4b2" alt="no unsafe in core">
   <img src="https://img.shields.io/badge/license-MIT-0e9c8c" alt="license">
@@ -47,7 +47,7 @@ Ethernet  02:00:00:00:a1:01 -> 02:00:00:00:a1:02  ethertype 0x0800 (IPv4)
           IPv4  10.0.0.10 -> 10.0.0.20  proto 17 (UDP)  ttl 64  cksum ok
 ```
 ```bash
-cargo test --workspace                    # 52 tests
+cargo test --workspace                    # 68 tests
 cargo run -p andromeda-cli -- bench        # performance table (mean ± sd)
 ```
 
@@ -155,14 +155,28 @@ Requires a recent stable Rust toolchain; the AF_XDP path needs a Linux kernel wi
 
 ## Status & roadmap
 
-**Done:** byte-exact L2/L3/L4 + ARP parsing · Andromeda overlay · incremental
-checksums · SNAT/DNAT + conntrack · SDN fabric + TOML config · proxy-ARP gateway ·
-**multi-VPC (tenant isolation by VNI — same inner IP in two VPCs stays separate)** ·
-AF_XDP datapath · two-node overlay ping · header templating + zero-copy encap ·
-rigorous benchmarks + the cache experiment · 52 tests (incl. property/fuzz), CI, clippy/fmt clean.
+**New in 0.2.0:**
+- **Path-MTU Discovery** — a tenant `DF` datagram too big for the overlay gets an ICMP
+  "Fragmentation Needed" (RFC 1191) back instead of a silent blackhole (all encap paths).
+- **Dynamic control plane** — hot-reload the SDN fabric over a Unix socket with **zero
+  packet loss** (`ArcSwap`), no restart: `echo 'reload node.toml' | nc -U <sock>`.
+- **Zero-copy datapath** — native-driver `XDP_ZEROCOPY` bind with a transparent fallback
+  to copy mode, and honest reporting of the mode actually achieved (`--zerocopy`).
+- **Lock-free SPSC ring** for per-core hand-off — **model-checked with `loom`** — plus
+  CPU pinning, the building blocks of multi-queue scaling.
+- **`hw-validate.sh`** — one unattended script that reports what a box can and cannot
+  measure (native ZC / PMU / tail-latency), so bare-metal numbers stay honest.
 
-**Next:** native-mode zero-copy AF_XDP on a real NIC (with PMU data) · a live
-multi-tenant-port switch · IPv6/ND · MAC learning · shared-UMEM zero-copy across both ports.
+**Done:** byte-exact L2/L3/L4 + ARP parsing · Andromeda overlay · incremental
+checksums · SNAT/DNAT + conntrack (with idle GC) · SDN fabric + TOML config · proxy-ARP
+gateway · **multi-VPC (tenant isolation by VNI)** · AF_XDP datapath · two-node overlay
+ping · header templating + zero-copy encap · PMTUD · hot-reload control plane · loom-
+verified SPSC ring · rigorous benchmarks + the cache experiment · 68 tests (incl.
+property/fuzz + a loom model-check), CI, clippy/fmt clean.
+
+**Next:** multi-queue orchestration (N pinned workers, one socket per RSS queue) ·
+**hardware validation** of zero-copy + PMU counters + p99.99 tail-latency on bare-metal
+(via `hw-validate.sh`) · timing-wheel conntrack GC · IPv6/ND · eBPF junk-packet prefilter.
 
 ## Docs
 
