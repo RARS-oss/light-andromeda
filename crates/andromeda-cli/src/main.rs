@@ -56,8 +56,10 @@ fn print_help() {
            --secs <n>          stop after n seconds\n  \
            --batch <n>         RX/TX batch size (default 64)\n  \
            --skb               force generic/SKB XDP mode\n  \
-           --drv               force native/driver XDP mode\n\n\
-         'run' requires the binary built with --features afxdp and CAP_NET_ADMIN (root)."
+           --drv               force native/driver XDP mode\n  \
+           --zerocopy | --zc   request true zero-copy UMEM (needs mlx5/ice/i40e/ixgbe; falls back to copy)\n\n\
+         'run'/'switch' require the binary built with --features afxdp and CAP_NET_ADMIN (root).\n  \
+         'switch' also takes --control <sock> to hot-reload the fabric over a Unix socket."
     );
 }
 
@@ -708,6 +710,7 @@ fn run_cmd(args: &[String]) {
     let mut max_secs: Option<u64> = None;
     let mut batch: u32 = 64;
     let mut xdp_mode = XdpMode::Auto;
+    let mut zerocopy = false;
 
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -733,6 +736,7 @@ fn run_cmd(args: &[String]) {
             "--batch" => batch = next_parse(&mut it, "--batch"),
             "--skb" => xdp_mode = XdpMode::Skb,
             "--drv" => xdp_mode = XdpMode::Drv,
+            "--zerocopy" | "--zc" => zerocopy = true,
             other => {
                 eprintln!("unknown option: {other}");
                 std::process::exit(2);
@@ -765,6 +769,7 @@ fn run_cmd(args: &[String]) {
 
     let xcfg = XskConfig {
         xdp_mode,
+        zerocopy,
         ..Default::default()
     };
     println!("binding AF_XDP to {iface} queue {queue} (mode={mode:?}, vni={vni}) ...",);
@@ -783,6 +788,19 @@ fn run_cmd(args: &[String]) {
         "bound. fd={}, free frames={}. Ctrl-C to stop.",
         sock.fd(),
         sock.free_frames()
+    );
+    println!(
+        "AF_XDP bind mode: {}{}",
+        if sock.is_zerocopy() {
+            "native zero-copy"
+        } else {
+            "copy"
+        },
+        if zerocopy && !sock.is_zerocopy() {
+            "  (zero-copy requested; this driver does not support it — fell back to copy)"
+        } else {
+            ""
+        }
     );
 
     afxdp::install_sigint_handler();
@@ -834,6 +852,7 @@ fn switch_cmd(args: &[String]) {
     let mut max_secs: Option<u64> = None;
     let mut batch: u32 = 64;
     let mut xdp_mode = XdpMode::Auto;
+    let mut zerocopy = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -850,6 +869,7 @@ fn switch_cmd(args: &[String]) {
             "--batch" => batch = next_parse(&mut it, "--batch"),
             "--skb" => xdp_mode = XdpMode::Skb,
             "--drv" => xdp_mode = XdpMode::Drv,
+            "--zerocopy" | "--zc" => zerocopy = true,
             other => {
                 eprintln!("unknown option: {other}");
                 std::process::exit(2);
@@ -932,6 +952,7 @@ fn switch_cmd(args: &[String]) {
 
     let xcfg = XskConfig {
         xdp_mode,
+        zerocopy,
         ..Default::default()
     };
     println!("switch: tenant={tif} underlay={uif} vni={vni} local={local_node} peer={peer_node}");
@@ -950,6 +971,24 @@ fn switch_cmd(args: &[String]) {
         }
     };
     println!("bound both ports. Ctrl-C to stop.");
+    println!(
+        "AF_XDP bind mode: tenant={} underlay={}{}",
+        if tenant.is_zerocopy() {
+            "zero-copy"
+        } else {
+            "copy"
+        },
+        if underlay.is_zerocopy() {
+            "zero-copy"
+        } else {
+            "copy"
+        },
+        if zerocopy && !(tenant.is_zerocopy() && underlay.is_zerocopy()) {
+            "  (zero-copy requested; fell back to copy where unsupported)"
+        } else {
+            ""
+        }
+    );
 
     afxdp::install_sigint_handler();
     let opts = RunOpts {

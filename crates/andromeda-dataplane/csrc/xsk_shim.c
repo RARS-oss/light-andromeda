@@ -34,17 +34,22 @@ struct andro_xsk {
     struct xsk_ring_cons rx;
     struct xsk_ring_prod tx;
     int fd;
+    int zc_bound; // 1 if the socket bound in zero-copy mode, 0 if copy mode.
 };
 
 // Open an AF_XDP socket on (ifname, queue_id) with a fresh UMEM.
 // `xdp_mode`: 0 = let libxdp choose (native, fall back to skb), 1 = force SKB
 // (generic) mode, 2 = force native (driver) mode.
+// `zerocopy`: 1 = request true zero-copy UMEM (needs a driver that supports it,
+// e.g. mlx5/ice/i40e/ixgbe); falls back to copy mode if the driver refuses.
+// 0 = copy mode (works everywhere, incl. veth). Query the result with
+// andro_xsk_zerocopy().
 // On failure returns NULL and sets *out_err to a positive errno.
 struct andro_xsk *andro_xsk_open(const char *ifname, uint32_t queue_id,
                                  uint32_t n_frames, uint32_t frame_size,
                                  uint32_t fill_size, uint32_t comp_size,
                                  uint32_t rx_size, uint32_t tx_size,
-                                 int xdp_mode, int *out_err) {
+                                 int xdp_mode, int zerocopy, int *out_err) {
     struct andro_xsk *x = calloc(1, sizeof(*x));
     if (!x) { if (out_err) *out_err = ENOMEM; return NULL; }
     x->frame_size = frame_size;
@@ -76,11 +81,21 @@ struct andro_xsk *andro_xsk_open(const char *ifname, uint32_t queue_id,
     scfg.libxdp_flags = 0;
     if (xdp_mode == 1)      scfg.xdp_flags = XDP_FLAGS_SKB_MODE;
     else if (xdp_mode == 2) scfg.xdp_flags = XDP_FLAGS_DRV_MODE;
-    else                    scfg.xdp_flags = 0;
-    // veth cannot do zero-copy; force copy mode and use need-wakeup semantics.
-    scfg.bind_flags = XDP_USE_NEED_WAKEUP | XDP_COPY;
+    // Zero-copy requires the native driver path; prefer it when none is forced.
+    else                    scfg.xdp_flags = zerocopy ? XDP_FLAGS_DRV_MODE : 0;
 
+    // First attempt: zero-copy if requested, else copy. Zero-copy binds only on a
+    // driver that supports it (mlx5/ice/i40e/ixgbe); on anything else (veth, virtio,
+    // generic mode) the create fails and we transparently fall back to copy mode.
+    scfg.bind_flags = XDP_USE_NEED_WAKEUP | (zerocopy ? XDP_ZEROCOPY : XDP_COPY);
     err = xsk_socket__create(&x->xsk, ifname, queue_id, x->umem, &x->rx, &x->tx, &scfg);
+    if (err && zerocopy) {
+        scfg.bind_flags = XDP_USE_NEED_WAKEUP | XDP_COPY;
+        err = xsk_socket__create(&x->xsk, ifname, queue_id, x->umem, &x->rx, &x->tx, &scfg);
+        x->zc_bound = 0;
+    } else {
+        x->zc_bound = (!err && zerocopy) ? 1 : 0;
+    }
     if (err) {
         if (out_err) *out_err = -err;
         xsk_umem__delete(x->umem); free(x->area); free(x); return NULL;
@@ -103,6 +118,9 @@ void *andro_umem_area(struct andro_xsk *x) { return x->area; }
 uint32_t andro_frame_size(struct andro_xsk *x) { return x->frame_size; }
 uint32_t andro_n_frames(struct andro_xsk *x) { return x->n_frames; }
 int andro_xsk_fd(struct andro_xsk *x) { return x->fd; }
+
+// 1 if the socket bound in true zero-copy mode, 0 if it is in (or fell back to) copy mode.
+int andro_xsk_zerocopy(struct andro_xsk *x) { return x ? x->zc_bound : 0; }
 
 // Hand `n` frame addresses to the FILL ring so the kernel can deliver RX into
 // them. Returns how many were actually enqueued (bounded by ring space).

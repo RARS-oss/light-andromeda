@@ -137,14 +137,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "6. AF_XDP bind mode (needs --iface + root + the afxdp feature)"
+section "6. AF_XDP zero-copy bind (needs --iface + root + libxdp)"
 if [[ -z "$IFACE" ]]; then
-  miss "skipped: no --iface"
+  miss "skipped: no --iface (pass --iface <dev> on a bare-metal box to test real zero-copy)"
 elif [[ "$(id -u)" != 0 ]]; then
-  miss "skipped: AF_XDP bind needs root (re-run with sudo --iface $IFACE)"
+  miss "skipped: AF_XDP bind needs root (re-run: sudo $0 --iface $IFACE)"
+elif ! ( cd "$REPO_ROOT" && cargo build --release -p andromeda-cli --features afxdp >/dev/null 2>"$OUT/afxdp-build.txt" ); then
+  miss "afxdp build failed — install: libxdp-dev libbpf-dev clang m4 pkg-config (see $OUT/afxdp-build.txt)"
 else
-  note "NIC-level AF_XDP native/zero-copy bind is a v0.2 code path (currently the datapath forces XDP_COPY)."
-  note "Once v0.2 lands, this section will attempt bind order: zero-copy → native(drv) → skb(generic) and report which held."
+  BIN="$REPO_ROOT/target/release/andromeda"
+  note "requesting zero-copy on $IFACE for 1s (transparently falls back to copy if unsupported):"
+  "$BIN" run "$IFACE" --zerocopy --secs 1 > "$OUT/afxdp-bind.txt" 2>&1 || true
+  grep -iE "bind mode|^bound|EPERM|failed to open" "$OUT/afxdp-bind.txt" | sed 's/^/    /' || true
+  if grep -qi "native zero-copy" "$OUT/afxdp-bind.txt"; then
+    ok "TRUE ZERO-COPY achieved on $IFACE — this is the number to benchmark"
+  elif grep -qi "bind mode: copy" "$OUT/afxdp-bind.txt"; then
+    miss "bound in COPY mode: this driver has no AF_XDP zero-copy (expected on veth/virtio)"
+  else
+    miss "could not bind (need root + a real NIC + libxdp; see $OUT/afxdp-bind.txt)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

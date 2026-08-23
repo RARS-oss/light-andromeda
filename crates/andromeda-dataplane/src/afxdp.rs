@@ -35,11 +35,13 @@ extern "C" {
         rx_size: c_uint,
         tx_size: c_uint,
         xdp_mode: c_int,
+        zerocopy: c_int,
         out_err: *mut c_int,
     ) -> *mut AndroXsk;
     fn andro_xsk_close(x: *mut AndroXsk);
     fn andro_umem_area(x: *mut AndroXsk) -> *mut u8;
     fn andro_xsk_fd(x: *mut AndroXsk) -> c_int;
+    fn andro_xsk_zerocopy(x: *mut AndroXsk) -> c_int;
     fn andro_fq_push(x: *mut AndroXsk, addrs: *const u64, n: c_uint) -> c_uint;
     fn andro_rx_peek(x: *mut AndroXsk, addrs: *mut u64, lens: *mut c_uint, max: c_uint) -> c_uint;
     fn andro_tx_push(x: *mut AndroXsk, addrs: *const u64, lens: *const c_uint, n: c_uint)
@@ -71,6 +73,10 @@ pub struct XskConfig {
     pub rx_size: u32,
     pub tx_size: u32,
     pub xdp_mode: XdpMode,
+    /// Request true zero-copy UMEM. Needs a driver that supports it (mlx5/ice/i40e/
+    /// ixgbe); on any other NIC (veth, virtio, generic mode) the bind transparently
+    /// falls back to copy mode. Check the achieved mode with [`XskSocket::is_zerocopy`].
+    pub zerocopy: bool,
 }
 
 impl Default for XskConfig {
@@ -83,6 +89,7 @@ impl Default for XskConfig {
             rx_size: 2048,
             tx_size: 2048,
             xdp_mode: XdpMode::Auto,
+            zerocopy: false,
         }
     }
 }
@@ -93,6 +100,7 @@ pub struct XskSocket {
     area: *mut u8,
     frame_size: u32,
     fd: i32,
+    zerocopy: bool,
     /// Frame addresses currently owned by user space (available for TX or refill).
     free: Vec<u64>,
 }
@@ -114,6 +122,7 @@ impl XskSocket {
                 cfg.rx_size,
                 cfg.tx_size,
                 cfg.xdp_mode as c_int,
+                cfg.zerocopy as c_int,
                 &mut err,
             )
         };
@@ -122,6 +131,7 @@ impl XskSocket {
         }
         let area = unsafe { andro_umem_area(ptr) };
         let fd = unsafe { andro_xsk_fd(ptr) };
+        let zerocopy = unsafe { andro_xsk_zerocopy(ptr) } != 0;
         // All frames start free; RX frames get moved into the FILL ring below.
         let free: Vec<u64> = (0..cfg.n_frames as u64)
             .map(|i| i * cfg.frame_size as u64)
@@ -131,6 +141,7 @@ impl XskSocket {
             area,
             frame_size: cfg.frame_size,
             fd,
+            zerocopy,
             free,
         };
         s.refill(cfg.fill_size);
@@ -140,6 +151,14 @@ impl XskSocket {
     #[must_use]
     pub fn fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Whether the socket bound in true zero-copy mode (`true`) or fell back to / was
+    /// asked for copy mode (`false`). Honest reporting for benchmarks: on veth/virtio
+    /// this is always `false` even when zero-copy was requested.
+    #[must_use]
+    pub fn is_zerocopy(&self) -> bool {
+        self.zerocopy
     }
 
     #[must_use]
