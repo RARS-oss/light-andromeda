@@ -311,6 +311,28 @@ pub fn install_sigint_handler() {
     }
 }
 
+/// Pin the current thread to a single CPU core (1 core = 1 RX/TX queue = 1 worker), so
+/// a per-queue forwarding thread stays put and its rings/UMEM stay cache-hot instead of
+/// bouncing across cores. This is the pinning half of the multi-queue scaling model;
+/// pair it with one [`XskSocket`] per queue and an SPSC ring
+/// ([`crate::spsc`]) for any cross-core hand-off.
+///
+/// # Errors
+/// Returns the OS error if the affinity call fails (e.g. an out-of-range core id).
+pub fn pin_current_thread_to_core(core: usize) -> io::Result<()> {
+    // Safety: `set` is zero-initialized then populated before the call; the size passed
+    // matches the type. sched_setaffinity(0, ...) targets the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(core, &mut set);
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Evict NAT bindings idle longer than this (ms). Conntrack-style idle timeout;
 /// without periodic eviction the SNAT port pool and conntrack tables never reclaim.
 const NAT_IDLE_TIMEOUT_MS: u64 = 120_000;

@@ -6,6 +6,10 @@ license.workspace = true
 description = "AF_XDP kernel-bypass dataplane: RX/TX rings, per-packet parse -> overlay/NAT -> forward"
 build = "build.rs"
 
+[lints.rust]
+# `loom` is a custom cfg enabled only for `--cfg loom` model-check runs of the SPSC ring.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [dependencies]
 andromeda-core = { workspace = true }
 andromeda-nat = { workspace = true }
@@ -15,6 +19,11 @@ libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+
+# The lock-free SPSC ring is model-checked with loom under `--cfg loom`; loom is only
+# pulled in for those runs, never in a normal build/test.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [build-dependencies]
 cc = "1"

@@ -7,6 +7,9 @@
 
 pub mod pipeline;
 
+/// Lock-free single-producer/single-consumer ring for per-core packet hand-off.
+pub mod spsc;
+
 #[cfg(feature = "afxdp")]
 pub mod afxdp;
 
