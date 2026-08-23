@@ -4,6 +4,22 @@ All notable changes to Light-Andromeda are recorded here. The format loosely fol
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer (0.x: minor =
 features, patch = fixes).
 
+## [0.2.1]
+
+### Added
+- **Hardware validation on a real PMU** (report §6.7). On an AMD Ryzen 7 3700X (Linux
+  6.8) the encapsulation core measures **3.19 instructions/cycle** at a **0.37 % L1d
+  load-miss rate** — turning the "compute-bound while cache-resident" inference of §6.3
+  into a direct measurement — and the working-set cache experiment reproduces on this
+  second machine. The live two-node AF_XDP overlay `ping` was re-verified on a real
+  kernel (4/4, 0 % loss). Native zero-copy remains unvalidated (the host is a KVM guest
+  with a `virtio_net` NIC, which has no AF_XDP zero-copy path; `--zerocopy` correctly
+  fell back to copy).
+
+### Fixed
+- `bench --sweep` printed a hard-coded `AMD Ryzen 5 5600` header regardless of the host;
+  it now reports the actual CPU from `/proc/cpuinfo`.
+
 ## [0.2.0]
 
 Production edge cases, a live control plane, and the groundwork for hardware-class

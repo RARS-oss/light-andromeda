@@ -275,6 +275,33 @@ agreeing on the wire format); **(b)** the copy and zero-copy encap paths are ass
 byte-identical. End-to-end, a real `ping` crosses two switches over the overlay:
 4/4, 0 % loss.
 
+### 6.7 Hardware validation (v0.2): PMU counters and a second machine
+
+The §6.3 claim — compute-bound while cache-resident — is an *inference* from throughput
+curves. On a second machine with a working PMU (**AMD Ryzen 7 3700X**, Linux 6.8), we
+measured it directly. Running the encapsulation benchmark under `perf stat`:
+
+| Counter | Value | Reading |
+|---|---:|---|
+| Instructions per cycle | **3.19** | near the core's issue width — the pipeline is busy, not stalled |
+| L1d load-miss rate | **0.37 %** | the hot working set lives in L1 — cache-resident, as claimed |
+| Branch-miss | 1.8 M / 124 B insn | negligible |
+
+An IPC of 3.19 with a sub-1 % L1d miss rate is the hardware signature of a compute-bound,
+cache-resident loop — turning the §6.3 inference into a measurement. The working-set
+sweep also **reproduced on this second machine**: sequential access stays flat across five
+orders of magnitude while shuffled access collapses (~5×) once the set spills the L2/L3,
+confirming the effect is a property of the access pattern, not of one CPU. (LLC events
+were `<not supported>` under this KVM vPMU, so only the L1d figure is reported.)
+
+**Not validated here:** native zero-copy AF_XDP and line-rate tail-latency. This host is a
+KVM guest with a `virtio_net` NIC, which has no AF_XDP zero-copy path — the datapath's
+`--zerocopy` request correctly and observably fell back to copy mode. Confirming true
+zero-copy and a p99.99 tail under load still requires bare-metal with an
+mlx5/ice/i40e/ixgbe NIC; the shipped `scripts/hw-validate.sh` performs that measurement
+honestly when such hardware is available. The live AF_XDP overlay datapath itself was
+re-verified on this real kernel (not WSL): the two-node `ping` is again 4/4, 0 % loss.
+
 ---
 
 ## 7. Discussion

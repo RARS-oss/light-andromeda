@@ -63,6 +63,21 @@ fn print_help() {
     );
 }
 
+/// Best-effort CPU model name (from `/proc/cpuinfo` on Linux), so the sweep header
+/// reports the machine it actually ran on instead of a baked-in guess.
+fn cpu_model() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|m| m.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown (see `lscpu`)".to_string())
+}
+
 /// Push one tenant frame through a two-node pipeline and report the result.
 fn selftest() {
     let mut fabric = Fabric::new("192.168.1.1".parse().unwrap());
@@ -539,7 +554,7 @@ fn bench_sweep(json: bool) {
         println!(
             "working-set sweep: zero-copy batch encap, {inner_len}B inner, {stride}B/frame stride"
         );
-        println!("AMD Ryzen 5 5600 — L1d 32KB/core, L2 512KB/core, L3 32MB shared\n");
+        println!("host CPU: {}\n", cpu_model());
         println!("  working set     frames    seq Mpps   shuffled Mpps");
     }
     let mut out = String::from("[");
