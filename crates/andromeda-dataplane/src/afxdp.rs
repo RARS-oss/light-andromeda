@@ -10,8 +10,9 @@
 //! split between the FILL ring (for RX) and TX; completed TX frames return to the
 //! free list. This is the ring-buffer bookkeeping AF_XDP pushes onto the app.
 
-use crate::pipeline::{Decision, Pipeline};
+use crate::pipeline::{Decision, FabricHandle, Pipeline, PipelineConfig};
 use andromeda_core::{ethernet::EthFrame, five_tuple_of};
+use andromeda_nat::NatEngine;
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_char, c_int, c_uint};
@@ -442,6 +443,60 @@ pub fn run(sock: &mut XskSocket, pipeline: &mut Pipeline, opts: RunOpts) -> io::
         sock.refill(batch);
     }
 
+    Ok(stats)
+}
+
+/// Run the switch across `n_queues` per-core workers. Worker `q` pins to core `q`,
+/// binds AF_XDP queue `q` on both the tenant and underlay interfaces, and forwards with
+/// its own [`Pipeline`] — its own [`NatEngine`], so conntrack/port state is **sharded
+/// per core** with no cross-thread locking — over the *shared* hot-reloadable `fabric`
+/// (a `reload` on the control plane reaches every worker at once).
+///
+/// The NIC's RSS spreads each flow to a queue, so aggregate throughput scales with
+/// cores. **This needs a real multi-queue NIC**: on a single-queue device (veth) only
+/// worker 0 receives traffic. Blocks until every worker stops (Ctrl-C / cap); returns
+/// per-worker stats.
+#[allow(clippy::too_many_arguments)]
+pub fn run_multiqueue(
+    tenant_if: &str,
+    underlay_if: &str,
+    n_queues: u32,
+    xcfg: XskConfig,
+    fabric: FabricHandle,
+    cfg: PipelineConfig,
+    nat_ip: std::net::Ipv4Addr,
+    nat_ports: (u16, u16),
+    opts: RunOpts,
+) -> io::Result<Vec<RunStats>> {
+    let mut workers = Vec::with_capacity(n_queues as usize);
+    for q in 0..n_queues {
+        let tif = tenant_if.to_string();
+        let uif = underlay_if.to_string();
+        let fabric = std::sync::Arc::clone(&fabric);
+        let cfg = cfg.clone();
+        // Each worker opens its own sockets *inside* the thread, so no AF_XDP socket ever
+        // crosses a thread boundary; only Send data (names, config, the fabric handle,
+        // Copy configs) is moved in.
+        workers.push(std::thread::spawn(move || -> io::Result<RunStats> {
+            if let Err(e) = pin_current_thread_to_core(q as usize) {
+                eprintln!("worker {q}: could not pin to core {q}: {e}");
+            }
+            let mut tenant = XskSocket::open(&tif, q, &xcfg)?;
+            let mut underlay = XskSocket::open(&uif, q, &xcfg)?;
+            let nat = NatEngine::new(nat_ip, nat_ports.0, nat_ports.1);
+            let mut pipeline = Pipeline::new_shared(cfg, fabric, nat);
+            run_switch(&mut tenant, &mut underlay, &mut pipeline, opts)
+        }));
+    }
+
+    let mut stats = Vec::with_capacity(workers.len());
+    for (q, w) in workers.into_iter().enumerate() {
+        match w.join() {
+            Ok(Ok(s)) => stats.push(s),
+            Ok(Err(e)) => eprintln!("worker {q} error: {e}"),
+            Err(_) => eprintln!("worker {q} panicked"),
+        }
+    }
     Ok(stats)
 }
 

@@ -845,6 +845,7 @@ fn switch_cmd(args: &[String]) {
     let mut underlay_if: Option<String> = None;
     let mut config_path: Option<String> = None;
     let mut control_sock: Option<String> = None;
+    let mut queues: u32 = 1;
     let mut vni: u32 = 100;
     let mut local_node: Ipv4Addr = "192.168.1.1".parse().unwrap();
     let mut peer_node: Ipv4Addr = "192.168.1.2".parse().unwrap();
@@ -861,6 +862,7 @@ fn switch_cmd(args: &[String]) {
             "--underlay" => underlay_if = Some(next_str(&mut it, "--underlay")),
             "--config" => config_path = Some(next_str(&mut it, "--config")),
             "--control" => control_sock = Some(next_str(&mut it, "--control")),
+            "--queues" => queues = next_parse(&mut it, "--queues"),
             "--vni" => vni = next_parse(&mut it, "--vni"),
             "--local-node" => local_node = next_parse(&mut it, "--local-node"),
             "--peer-node" => peer_node = next_parse(&mut it, "--peer-node"),
@@ -878,7 +880,7 @@ fn switch_cmd(args: &[String]) {
     }
 
     let (Some(tif), Some(uif)) = (tenant_if, underlay_if) else {
-        eprintln!("usage: andromeda switch --tenant <if> --underlay <if> [--config f.toml | --vni N --local-node IP --peer-node IP ...] [--control sock]");
+        eprintln!("usage: andromeda switch --tenant <if> --underlay <if> [--config f.toml | --vni N --local-node IP --peer-node IP ...] [--control sock] [--queues N]");
         std::process::exit(2);
     };
 
@@ -934,6 +936,63 @@ fn switch_cmd(args: &[String]) {
         let nat = NatEngine::new(nat_ip.unwrap_or(local_node), 20000, 60000);
         (fabric, cfg, nat)
     };
+
+    // Multi-queue: one pinned worker per RSS queue, each with its own (sharded) NAT, all
+    // reading the same hot-reloadable fabric. Needs a multi-queue NIC to actually scale.
+    if queues > 1 {
+        let nat_ip = cfg.nat_ip.unwrap_or(cfg.local_node_ip);
+        let handle = andromeda_dataplane::shared_fabric(fabric);
+        if let Some(sock) = &control_sock {
+            match andromeda_dataplane::control::serve(sock, handle.clone()) {
+                Ok(_) => println!("control: listening on {sock}"),
+                Err(e) => {
+                    eprintln!("control: cannot bind {sock}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        let xcfg = XskConfig {
+            xdp_mode,
+            zerocopy,
+            ..Default::default()
+        };
+        println!("switch: {queues} pinned workers, tenant={tif} underlay={uif} vni={vni}");
+        println!("(RSS steers flows to queues; on a single-queue NIC only worker 0 sees traffic)");
+        afxdp::install_sigint_handler();
+        let opts = RunOpts {
+            mode: Mode::Encap,
+            max_packets: None,
+            max_secs,
+            batch,
+        };
+        match afxdp::run_multiqueue(
+            &tif,
+            &uif,
+            queues,
+            xcfg,
+            handle,
+            cfg,
+            nat_ip,
+            (20000, 60000),
+            opts,
+        ) {
+            Ok(all) => {
+                let (rx, tx, dr) = all.iter().fold((0u64, 0u64, 0u64), |(a, b, c), s| {
+                    (a + s.rx, b + s.tx, c + s.dropped)
+                });
+                println!(
+                    "\n--- done ({} workers) --- rx={rx} tx={tx} dropped={dr}",
+                    all.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("multiqueue: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let mut pipeline = Pipeline::new(cfg, fabric, nat);
 
     // Optional control plane: hot-reload the fabric over a Unix socket without stopping

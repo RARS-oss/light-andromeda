@@ -26,6 +26,18 @@ use arc_swap::ArcSwap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+/// A cloneable handle to a hot-swappable fabric map, shared by the data path and the
+/// control plane (and by every per-core worker in the multi-queue datapath).
+pub type FabricHandle = Arc<ArcSwap<Fabric>>;
+
+/// Wrap a fabric in a shared, hot-swappable handle. Build one, then hand clones to each
+/// worker pipeline ([`Pipeline::new_shared`]) and to the control server so a `reload`
+/// updates them all at once.
+#[must_use]
+pub fn shared_fabric(fabric: Fabric) -> FabricHandle {
+    Arc::new(ArcSwap::from_pointee(fabric))
+}
+
 /// Static configuration for one switch instance. `vni` is the *default* VPC used by
 /// [`Pipeline::on_tenant_frame`]; a multi-VPC switch calls
 /// [`Pipeline::encap_for_vni`] with the ingress port's VNI, and decapsulation accepts
@@ -171,10 +183,19 @@ fn flow_hash_of(ip: &Ipv4View) -> u16 {
 impl Pipeline {
     #[must_use]
     pub fn new(cfg: PipelineConfig, fabric: Fabric, nat: NatEngine) -> Self {
+        Self::new_shared(cfg, shared_fabric(fabric), nat)
+    }
+
+    /// Like [`Pipeline::new`], but the fabric is an already-shared handle. Several
+    /// per-core worker pipelines built from the *same* handle read one hot-reloadable
+    /// map (a `reload` reaches all of them atomically), while each keeps its own NAT —
+    /// so conntrack/port state is sharded per core with no cross-thread contention.
+    #[must_use]
+    pub fn new_shared(cfg: PipelineConfig, fabric: FabricHandle, nat: NatEngine) -> Self {
         let tmpl = OuterTemplate::new(&cfg);
         Self {
             cfg,
-            fabric: Arc::new(ArcSwap::from_pointee(fabric)),
+            fabric,
             nat,
             tmpl,
             ip_id: 0,
@@ -193,7 +214,7 @@ impl Pipeline {
     /// A cloneable handle to the hot-swappable fabric, so a control-plane thread can
     /// call [`ArcSwap::store`] on it to reload the map that this pipeline reads.
     #[must_use]
-    pub fn fabric_handle(&self) -> Arc<ArcSwap<Fabric>> {
+    pub fn fabric_handle(&self) -> FabricHandle {
         Arc::clone(&self.fabric)
     }
 

@@ -17,4 +17,4 @@ pub mod afxdp;
 #[cfg(unix)]
 pub mod control;
 
-pub use pipeline::{Decision, FrameSlot, Pipeline, PipelineConfig};
+pub use pipeline::{shared_fabric, Decision, FabricHandle, FrameSlot, Pipeline, PipelineConfig};
