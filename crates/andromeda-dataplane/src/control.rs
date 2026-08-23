@@ -12,6 +12,7 @@
 use andromeda_control::{Fabric, NodeConfig};
 use arc_swap::ArcSwap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,6 +74,11 @@ pub fn serve(path: impl AsRef<Path>, fabric: FabricHandle) -> std::io::Result<Jo
     // A stale socket file from a previous run would make bind() fail with EADDRINUSE.
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
+    // Owner-only (0600), independent of umask: connecting to a filesystem Unix socket
+    // requires write access to its inode, so this restricts the fabric-reload channel to
+    // the same uid (and root). The `reload` command can redirect every tenant's traffic,
+    // so this access control is load-bearing, not cosmetic.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     Ok(thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {

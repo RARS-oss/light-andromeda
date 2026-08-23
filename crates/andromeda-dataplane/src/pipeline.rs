@@ -395,8 +395,18 @@ impl Pipeline {
         };
         let mut flow = flow0;
 
-        // Overlay PMTUD (same rule as the copy path): a DF datagram that won't fit under
-        // the overlay header gets an ICMP reply instead of an oversize forwarded frame.
+        let (dst_node, new_dst_mac, do_snat) =
+            match self.fabric.load().resolve(self.cfg.vni, inner_dst) {
+                Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
+                None => match self.cfg.gateway_node_ip {
+                    Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
+                    None => return self.drop("no-route"),
+                },
+            };
+
+        // Overlay PMTUD — same rule *and ordering* as the copy path (checked only after
+        // the frame is routable): a DF datagram that won't fit under the overlay header
+        // gets an ICMP reply instead of an oversize forwarded frame.
         let inner_mtu = self
             .cfg
             .underlay_mtu
@@ -419,15 +429,6 @@ impl Pipeline {
                 Err(_) => self.drop("pmtud-build"),
             };
         }
-
-        let (dst_node, new_dst_mac, do_snat) =
-            match self.fabric.load().resolve(self.cfg.vni, inner_dst) {
-                Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
-                None => match self.cfg.gateway_node_ip {
-                    Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
-                    None => return self.drop("no-route"),
-                },
-            };
 
         if let Some(m) = new_dst_mac {
             frame[ioff..ioff + 6].copy_from_slice(&m.0);
@@ -554,6 +555,14 @@ impl Pipeline {
         vni: u32,
     ) {
         use andromeda_core::ipv4::IPV4_MIN_HDR_LEN;
+
+        // Parity with `overlay::encap_in_place`: the outer 16-bit length fields can't
+        // represent an inner frame this large. Unreachable on the datapath (a UMEM frame
+        // bounds inner_len far below 2^16), but assert the invariant the casts rely on.
+        debug_assert!(
+            inner_len <= u16::MAX as usize - (IPV4_MIN_HDR_LEN + 8 + overlay::ANDROMEDA_HDR_LEN),
+            "inner frame too large for the 16-bit outer length"
+        );
 
         out[..42].copy_from_slice(&self.tmpl.prefix);
 

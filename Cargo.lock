@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "andromeda-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "andromeda-control",
  "andromeda-core",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "andromeda-control"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "andromeda-core",
  "rustc-hash",
@@ -33,14 +33,14 @@ dependencies = [
 
 [[package]]
 name = "andromeda-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "andromeda-dataplane"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "andromeda-control",
  "andromeda-core",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "andromeda-nat"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "andromeda-core",
  "proptest",

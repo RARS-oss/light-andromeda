@@ -21,6 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(loom))]
 use std::sync::Arc;
 
+use std::cell::Cell;
+use std::marker::PhantomData;
+
 /// A `std::cell::UnsafeCell` wrapper exposing loom's `with`/`with_mut` API, so the ring
 /// body is written once and compiles under both loom and the real allocator.
 #[cfg(not(loom))]
@@ -56,14 +59,22 @@ struct Ring<T> {
 unsafe impl<T: Send> Send for Ring<T> {}
 unsafe impl<T: Send> Sync for Ring<T> {}
 
-/// The producer half. Owned by exactly one thread.
+/// A zero-sized `!Sync` marker (`Send`, but not shareable by reference). The SPSC
+/// safety argument requires each half to be driven by exactly one thread; this makes
+/// sharing `&Producer`/`&Consumer` across threads a *compile error*, closing a hole the
+/// loom model (which spawns exactly one producer and one consumer) cannot detect.
+type OneThread = PhantomData<Cell<()>>;
+
+/// The producer half. Owned by exactly one thread (`Send`, `!Sync`).
 pub struct Producer<T> {
     ring: Arc<Ring<T>>,
+    _one_thread: OneThread,
 }
 
-/// The consumer half. Owned by exactly one thread.
+/// The consumer half. Owned by exactly one thread (`Send`, `!Sync`).
 pub struct Consumer<T> {
     ring: Arc<Ring<T>>,
+    _one_thread: OneThread,
 }
 
 /// Create an SPSC ring holding up to `capacity` elements (rounded up to a power of two,
@@ -80,8 +91,12 @@ pub fn channel<T: Copy + Default>(capacity: usize) -> (Producer<T>, Consumer<T>)
     (
         Producer {
             ring: Arc::clone(&ring),
+            _one_thread: PhantomData,
         },
-        Consumer { ring },
+        Consumer {
+            ring,
+            _one_thread: PhantomData,
+        },
     )
 }
 

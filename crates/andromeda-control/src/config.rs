@@ -197,8 +197,17 @@ impl NodeConfig {
 
     /// Load and parse a config file.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+        use std::io::Read;
+        // Configs are tiny; cap the read so a huge or endless file (e.g. `/dev/zero`
+        // passed to the control-plane `reload`) can't OOM the daemon reading it.
+        const MAX_CONFIG_BYTES: u64 = 1 << 20; // 1 MiB
+        let err = |e: std::io::Error| ConfigError(format!("{}: {e}", path.display()));
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .map_err(err)?
+            .take(MAX_CONFIG_BYTES)
+            .read_to_string(&mut text)
+            .map_err(err)?;
         Self::parse(&text)
     }
 

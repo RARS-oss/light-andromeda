@@ -52,6 +52,8 @@ struct andro_xsk *andro_xsk_open(const char *ifname, uint32_t queue_id,
                                  int xdp_mode, int zerocopy, int *out_err) {
     struct andro_xsk *x = calloc(1, sizeof(*x));
     if (!x) { if (out_err) *out_err = ENOMEM; return NULL; }
+    // frame_size is used as a divisor in andro_rx_peek; reject 0 up front (SIGFPE guard).
+    if (frame_size == 0) { if (out_err) *out_err = EINVAL; free(x); return NULL; }
     x->frame_size = frame_size;
     x->n_frames = n_frames;
 
@@ -90,6 +92,9 @@ struct andro_xsk *andro_xsk_open(const char *ifname, uint32_t queue_id,
     scfg.bind_flags = XDP_USE_NEED_WAKEUP | (zerocopy ? XDP_ZEROCOPY : XDP_COPY);
     err = xsk_socket__create(&x->xsk, ifname, queue_id, x->umem, &x->rx, &x->tx, &scfg);
     if (err && zerocopy) {
+        // Drop the forced native flag too, so libxdp can degrade to SKB/generic on an
+        // interface with no native XDP — not only to copy mode on a native driver.
+        scfg.xdp_flags = 0;
         scfg.bind_flags = XDP_USE_NEED_WAKEUP | XDP_COPY;
         err = xsk_socket__create(&x->xsk, ifname, queue_id, x->umem, &x->rx, &x->tx, &scfg);
         x->zc_bound = 0;
@@ -151,8 +156,12 @@ uint32_t andro_rx_peek(struct andro_xsk *x, uint64_t *addrs, uint32_t *lens, uin
         // read, no crossing into the next slot, no aliasing with a TX frame). Since
         // frame_size divides area_sz, a slot never crosses the UMEM boundary either.
         if (a >= area_sz) { a = 0; l = 0; }
-        uint32_t slot_room = x->frame_size - (uint32_t)(a % x->frame_size);
-        if (l > slot_room) l = slot_room;
+        // Snap the address to its frame-slot base: an unaligned descriptor address (a
+        // buggy/native-mode driver) must never be recycled into the frame pool as an
+        // unaligned offset and later sliced as a full frame past the UMEM end. Aligned
+        // mode (flags=0) already delivers slot-aligned addresses, so this is a no-op there.
+        a -= a % x->frame_size;
+        if (l > x->frame_size) l = x->frame_size;
         addrs[i] = a;
         lens[i] = l;
     }

@@ -321,8 +321,17 @@ pub fn install_sigint_handler() {
 /// # Errors
 /// Returns the OS error if the affinity call fails (e.g. an out-of-range core id).
 pub fn pin_current_thread_to_core(core: usize) -> io::Result<()> {
-    // Safety: `set` is zero-initialized then populated before the call; the size passed
-    // matches the type. sched_setaffinity(0, ...) targets the calling thread.
+    // `CPU_SET` indexes the fixed-size `cpu_set_t` bitmap with no bound check; an id past
+    // its capacity would corrupt the stack. Reject it up front instead.
+    if core >= libc::CPU_SETSIZE as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "core id out of range",
+        ));
+    }
+    // Safety: `set` is zero-initialized then populated before the call; `core` is in
+    // range (checked above); the size passed matches the type. sched_setaffinity(0, ...)
+    // targets the calling thread.
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut set);

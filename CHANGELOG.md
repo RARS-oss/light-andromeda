@@ -4,6 +4,36 @@ All notable changes to Light-Andromeda are recorded here. The format loosely fol
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer (0.x: minor =
 features, patch = fixes).
 
+## [0.2.2]
+
+Pre-publish audit hardening — two independent review agents (security **8.5/10**,
+correctness **9/10**): no wire-reachable memory-safety bug or panic, PII sweep clean;
+findings were control-plane hardening plus latent issues in shipped-but-not-yet-datapath
+code. All fixed:
+
+### Security / hardening
+- **SPSC ring is now `!Sync`.** `Producer`/`Consumer` carry a `PhantomData<Cell<()>>`
+  marker, so safe code can no longer share a half across threads and race two producers
+  into UB — a hole the (single-producer) loom model structurally cannot catch.
+- **Control socket is `0600`** (owner-only, independent of umask), restricting the
+  fabric-reload channel to the same uid / root.
+- **`NodeConfig::load` caps the read at 1 MiB**, so `reload /dev/zero` can't OOM the daemon.
+- **`pin_current_thread_to_core` rejects a core id ≥ `CPU_SETSIZE`** (was an out-of-bounds
+  stack write / UB).
+- **C shim:** snaps a recycled RX descriptor address to its frame-slot base (guards a
+  buggy/native-mode driver from an unaligned OOB write), rejects `frame_size == 0`
+  (SIGFPE guard), and drops the forced DRV flag on the copy fallback so it can also
+  degrade to SKB.
+- `stamp_outer` gained the same u16 overflow assert as `overlay::encap_in_place`.
+
+### Fixed
+- The zero-copy in-place path now checks PMTUD **after** routing (matching the copy
+  path), so an unroutable oversize-DF frame drops identically instead of emitting ICMP.
+
+### Docs
+- Visual report (`report.html`) gains the §6.7 hardware-validation section (real PMU:
+  3.19 IPC, 0.37% L1d miss on a Ryzen 7 3700X).
+
 ## [0.2.1]
 
 ### Added

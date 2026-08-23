@@ -203,6 +203,16 @@
     <p><b>The experiment refutes the guess — and says something sharper.</b> Sequential access is <b>flat at ~80 Mpps across five orders of magnitude</b> of working set: the hardware prefetcher hides all latency, so the code is <b>compute-bound</b>. Random access tracks the cache hierarchy exactly — level inside L2, a knee at the 512&nbsp;KB L2 boundary, and a collapse to <b>~9 Mpps (9× slower)</b> once the set exceeds the 32&nbsp;MB L3 and every packet pays a DRAM miss: <b>memory-latency-bound</b>. The regime depends on <em>locality, not the code</em> — and reporting only the cache-hot number would overstate real-world throughput by up to 9×. That's also why there's no fake "100 Mpps" from a single-flow cache here: it would "win" only on this single-flow benchmark.</p>
   </div>
 
+  <h3>Measured, not inferred: real PMU counters</h3>
+  <p>The "compute-bound while cache-resident" claim above is an <em>inference</em> from throughput curves. On a second machine with a working PMU (<b>AMD&nbsp;Ryzen&nbsp;7&nbsp;3700X</b>, Linux&nbsp;6.8), <code>perf stat</code> of the encap benchmark measures it directly:</p>
+  <div class="hero-stats" style="margin-top:16px">
+    <div class="hstat hi"><div class="n">3.19 <span class="u">IPC</span></div><div class="k">instructions / cycle</div></div>
+    <div class="hstat"><div class="n">0.37% <span class="u">L1d miss</span></div><div class="k">hot set stays in L1</div></div>
+    <div class="hstat"><div class="n">73 <span class="u">tests + loom</span></div><div class="k">pass on the real kernel</div></div>
+    <div class="hstat"><div class="n">4/4 <span class="u">ping</span></div><div class="k">live overlay, 0% loss</div></div>
+  </div>
+  <p>An IPC near the core's issue width with a sub-1% L1d miss rate is the hardware signature of a compute-bound, cache-resident loop — turning the inference into a measurement — and the working-set sweep <b>reproduces on this second CPU</b>. <b>Not validated:</b> true native zero-copy needs an mlx5/ice/i40e/ixgbe NIC; this host is a KVM guest on <code>virtio_net</code>, so the datapath's <code>--zerocopy</code> request correctly and observably fell back to copy mode. Confirming zero-copy throughput and a p99.99 tail stays honest future work.</p>
+
   <h2><span class="num">05</span>What it actually does live</h2>
   <p>Microbenchmarks measure the logic ceiling. A live AF_XDP socket adds the I/O the ceiling ignores. On the WSL2 veth setup (generic/SKB XDP, copy mode, single core), fed 64-byte UDP from a <code>sendmmsg</code> generator:</p>
   <div class="hero-stats" style="margin-top:16px">
