@@ -14,12 +14,15 @@
 //! incrementally via `andromeda-core`. This split keeps the policy layer trivially
 //! unit-testable without synthesizing real packets.
 
+pub mod timing_wheel;
+
 use andromeda_core::ipv4::{proto, Ipv4View, Ipv4ViewMut};
 use andromeda_core::tcp::TcpViewMut;
 use andromeda_core::udp::UdpViewMut;
 use andromeda_core::{FiveTuple, ParseError};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use timing_wheel::TimingWheel;
 
 /// Which way a packet is crossing the NAT boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +98,11 @@ pub struct NatEngine {
     /// DNAT reverse: internal server's reply tuple → restore external (ip, port).
     dnat_rev: HashMap<FiveTuple, Binding>,
 
+    /// Idle-timeout wheel over SNAT flows (keyed by the forward 5-tuple). Drives O(due)
+    /// expiry instead of an O(all-entries) scan; the horizon tracks the last `gc` timeout.
+    wheel: TimingWheel<FiveTuple>,
+    idle_timeout: u64,
+
     stats: NatStats,
 }
 
@@ -112,12 +120,23 @@ impl NatEngine {
             snat_fwd: HashMap::new(),
             snat_rev: HashMap::new(),
             dnat_rev: HashMap::new(),
+            // 1s granularity, 256s span — comfortably covers a typical idle timeout; the
+            // gc liveness re-check makes exact span non-critical anyway.
+            wheel: TimingWheel::new(1000, 256),
+            idle_timeout: 120_000,
             stats: NatStats::default(),
         }
     }
 
     pub fn add_dnat_rule(&mut self, rule: DnatRule) {
         self.dnat_rules.push(rule);
+    }
+
+    /// Set the idle timeout (ms) used to schedule newly-created flows in the expiry
+    /// wheel. `gc` adopts its own `timeout` argument each call, so this only affects
+    /// flows created before the first `gc`. Defaults to 120_000 (matches the datapath).
+    pub fn set_idle_timeout(&mut self, timeout: u64) {
+        self.idle_timeout = timeout;
     }
 
     #[must_use]
@@ -194,6 +213,10 @@ impl NatEngine {
                 last_seen: now,
             },
         );
+        // One wheel entry per flow, keyed by the forward tuple. Hits only touch
+        // `last_seen`; `gc` re-checks liveness when the entry fires and reschedules it.
+        self.wheel
+            .insert(tuple, now.saturating_add(self.idle_timeout));
 
         self.stats.snat_created += 1;
         Rewrite {
@@ -283,27 +306,58 @@ impl NatEngine {
         None
     }
 
-    /// Evict bindings idle for longer than `timeout` (same unit as `now`). Returns evicted count.
+    /// Evict SNAT flows idle for longer than `timeout` (same unit as `now`) and reclaim
+    /// their ports; returns how many were evicted.
+    ///
+    /// Expiry is driven by the timing wheel: [`TimingWheel::advance`] yields only the
+    /// flows whose deadline has arrived (O(due), not O(all bindings)). For each, the true
+    /// idle time is re-checked against both directions' `last_seen` — a flow still seeing
+    /// traffic on either side is rescheduled rather than dropped, so the wheel's precision
+    /// is never load-bearing. The bounded DNAT reverse table keeps a small periodic sweep.
     pub fn gc(&mut self, now: u64, timeout: u64) -> usize {
-        let cutoff = now.saturating_sub(timeout);
-        let mut freed_ports = Vec::new();
+        // Keep the scheduling horizon aligned with the caller's timeout.
+        self.idle_timeout = timeout;
 
-        self.snat_fwd.retain(|_, b| {
-            let keep = b.last_seen >= cutoff;
-            if !keep {
-                freed_ports.push(b.port);
+        let mut due = Vec::new();
+        self.wheel.advance(now, &mut due);
+
+        let mut freed = 0usize;
+        for k in due {
+            let Some(b) = self.snat_fwd.get(&k).copied() else {
+                continue; // already gone
+            };
+            // The paired reverse entry (as installed in process_outbound).
+            let rev_key = FiveTuple {
+                src_ip: k.dst_ip,
+                dst_ip: self.nat_ip,
+                protocol: k.protocol,
+                src_port: k.dst_port,
+                dst_port: b.port,
+            };
+            let rev_seen = self
+                .snat_rev
+                .get(&rev_key)
+                .map_or(b.last_seen, |rb| rb.last_seen);
+            let eff_last = b.last_seen.max(rev_seen);
+
+            if eff_last.saturating_add(timeout) <= now {
+                // Idle past the timeout in both directions → evict and free the port.
+                self.snat_fwd.remove(&k);
+                self.snat_rev.remove(&rev_key);
+                self.used_ports.remove(&b.port);
+                freed += 1;
+            } else {
+                // Still alive → reschedule a single fresh entry at its true deadline.
+                self.wheel.insert(k, eff_last.saturating_add(timeout));
             }
-            keep
-        });
-        self.snat_rev.retain(|_, b| b.last_seen >= cutoff);
+        }
+
+        // DNAT reverse is capped and keyed independently; a small sweep keeps it tidy.
+        let cutoff = now.saturating_sub(timeout);
         self.dnat_rev.retain(|_, b| b.last_seen >= cutoff);
 
-        for p in &freed_ports {
-            self.used_ports.remove(p);
-        }
-        let n = freed_ports.len();
-        self.stats.expired += n as u64;
-        n
+        self.stats.expired += freed as u64;
+        freed
     }
 }
 
@@ -442,21 +496,60 @@ mod tests {
 
     #[test]
     fn gc_frees_ports() {
+        // Times are in ms (the datapath uses elapsed-ms); idle timeout 5s.
         let mut nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20001);
+        nat.set_idle_timeout(5_000);
         nat.process(
             tuple("10.0.0.1", 1, "1.1.1.1", 80, proto::TCP),
             Direction::Outbound,
-            100,
+            1_000,
         );
         nat.process(
             tuple("10.0.0.2", 2, "1.1.1.1", 80, proto::TCP),
             Direction::Outbound,
-            100,
+            1_000,
         );
         assert_eq!(nat.active_bindings(), 2);
-        // Idle timeout of 50 at now=200 → both (last_seen 100) evicted.
-        let evicted = nat.gc(200, 50);
-        assert_eq!(evicted, 2);
+        assert_eq!(nat.stats().port_exhausted, 0);
+
+        // Not yet idle 5s: nothing evicted, and the port pool is still full.
+        assert_eq!(nat.gc(4_000, 5_000), 0);
+        assert_eq!(nat.active_bindings(), 2);
+
+        // Idle past 5s (last_seen 1_000, now 10_000) → both evicted, ports reclaimed.
+        assert_eq!(nat.gc(10_000, 5_000), 2);
+        assert_eq!(nat.active_bindings(), 0);
+
+        // A fresh flow can now allocate a port again (pool was reclaimed).
+        let rw = nat.process(
+            tuple("10.0.0.3", 3, "1.1.1.1", 80, proto::TCP),
+            Direction::Outbound,
+            11_000,
+        );
+        assert!(rw.new_src_port.is_some());
+    }
+
+    #[test]
+    fn gc_keeps_a_flow_still_seeing_reply_traffic() {
+        // A flow idle on the outbound side but still getting inbound replies must NOT be
+        // evicted — the wheel fires it as a candidate, but the re-check keeps it alive.
+        let mut nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20005);
+        nat.set_idle_timeout(5_000);
+        let out = tuple("10.0.0.1", 1234, "1.1.1.1", 80, proto::TCP);
+        let rw = nat.process(out, Direction::Outbound, 1_000);
+        let nat_port = rw.new_src_port.unwrap();
+
+        // Reply keeps arriving on the reverse path at t=9_000 (fresh).
+        let reply = tuple("1.1.1.1", 80, "203.0.113.7", nat_port, proto::TCP);
+        nat.process(reply, Direction::Inbound, 9_000);
+
+        // At t=10_000 the wheel fires the flow (scheduled for 6_000), but reverse
+        // last_seen is 9_000, so it is rescheduled, not dropped.
+        assert_eq!(nat.gc(10_000, 5_000), 0);
+        assert_eq!(nat.active_bindings(), 1);
+
+        // Once the replies stop, it does age out.
+        assert_eq!(nat.gc(20_000, 5_000), 1);
         assert_eq!(nat.active_bindings(), 0);
     }
 
