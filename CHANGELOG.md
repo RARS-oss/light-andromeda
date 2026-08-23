@@ -26,6 +26,12 @@ on bare-metal via `scripts/hw-validate.sh`.
 - **Lock-free SPSC ring** (`andromeda-dataplane::spsc`) for per-core packet hand-off,
   **model-checked with `loom`** plus a 200k-item real-threaded FIFO stress test; and
   `pin_current_thread_to_core` — the building blocks of multi-queue scaling.
+- **Multi-queue scaling.** `andromeda switch --queues N` fans out one pinned worker per
+  RSS queue, each with its own AF_XDP sockets and a **per-core-sharded NAT**, all reading
+  the shared hot-reloadable fabric (`run_multiqueue`, `Pipeline::new_shared`).
+- **Timing-wheel conntrack GC.** A standalone, unit-tested hashed timing wheel expires
+  idle SNAT flows in **O(due)** instead of scanning every binding, re-checking liveness
+  on both directions before evicting (a reply-only flow is kept, not dropped).
 - **`scripts/hw-validate.sh`** — an unattended environment/performance report that runs
   the bench in the best available mode and clearly labels what a box cannot validate
   (native ZC / PMU / tail-latency), so rented-bare-metal numbers stay honest.
