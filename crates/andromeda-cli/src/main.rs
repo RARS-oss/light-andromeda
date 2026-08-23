@@ -826,6 +826,7 @@ fn switch_cmd(args: &[String]) {
     let mut tenant_if: Option<String> = None;
     let mut underlay_if: Option<String> = None;
     let mut config_path: Option<String> = None;
+    let mut control_sock: Option<String> = None;
     let mut vni: u32 = 100;
     let mut local_node: Ipv4Addr = "192.168.1.1".parse().unwrap();
     let mut peer_node: Ipv4Addr = "192.168.1.2".parse().unwrap();
@@ -840,6 +841,7 @@ fn switch_cmd(args: &[String]) {
             "--tenant" => tenant_if = Some(next_str(&mut it, "--tenant")),
             "--underlay" => underlay_if = Some(next_str(&mut it, "--underlay")),
             "--config" => config_path = Some(next_str(&mut it, "--config")),
+            "--control" => control_sock = Some(next_str(&mut it, "--control")),
             "--vni" => vni = next_parse(&mut it, "--vni"),
             "--local-node" => local_node = next_parse(&mut it, "--local-node"),
             "--peer-node" => peer_node = next_parse(&mut it, "--peer-node"),
@@ -856,7 +858,7 @@ fn switch_cmd(args: &[String]) {
     }
 
     let (Some(tif), Some(uif)) = (tenant_if, underlay_if) else {
-        eprintln!("usage: andromeda switch --tenant <if> --underlay <if> [--config f.toml | --vni N --local-node IP --peer-node IP ...]");
+        eprintln!("usage: andromeda switch --tenant <if> --underlay <if> [--config f.toml | --vni N --local-node IP --peer-node IP ...] [--control sock]");
         std::process::exit(2);
     };
 
@@ -913,6 +915,20 @@ fn switch_cmd(args: &[String]) {
         (fabric, cfg, nat)
     };
     let mut pipeline = Pipeline::new(cfg, fabric, nat);
+
+    // Optional control plane: hot-reload the fabric over a Unix socket without stopping
+    // the forwarding loop. The listener thread holds a handle to the same ArcSwap.
+    if let Some(sock) = &control_sock {
+        match andromeda_dataplane::control::serve(sock, pipeline.fabric_handle()) {
+            Ok(_) => {
+                println!("control: listening on {sock}  (echo 'reload <cfg.toml>' | nc -U {sock})")
+            }
+            Err(e) => {
+                eprintln!("control: cannot bind {sock}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let xcfg = XskConfig {
         xdp_mode,

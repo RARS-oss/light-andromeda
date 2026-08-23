@@ -10,4 +10,8 @@ pub mod pipeline;
 #[cfg(feature = "afxdp")]
 pub mod afxdp;
 
+/// Unix-socket control plane for hot-reloading the fabric map (Linux/Unix only).
+#[cfg(unix)]
+pub mod control;
+
 pub use pipeline::{Decision, FrameSlot, Pipeline, PipelineConfig};

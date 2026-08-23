@@ -22,7 +22,9 @@ use andromeda_core::ipv4::Ipv4View;
 use andromeda_core::overlay;
 use andromeda_core::{arp, five_tuple_of};
 use andromeda_nat::{apply as nat_apply, Direction, NatEngine};
+use arc_swap::ArcSwap;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 /// Static configuration for one switch instance. `vni` is the *default* VPC used by
 /// [`Pipeline::on_tenant_frame`]; a multi-VPC switch calls
@@ -137,7 +139,10 @@ impl OuterTemplate {
 /// The forwarding engine: fabric map + NAT + config.
 pub struct Pipeline {
     cfg: PipelineConfig,
-    pub fabric: Fabric,
+    /// Hot-swappable fabric map. The data path reads it with a cheap lock-free
+    /// [`ArcSwap::load`]; the control plane replaces it atomically via
+    /// [`Pipeline::reload_fabric`] while the forwarding loop keeps running.
+    fabric: Arc<ArcSwap<Fabric>>,
     pub nat: NatEngine,
     tmpl: OuterTemplate,
     ip_id: u16,
@@ -169,12 +174,27 @@ impl Pipeline {
         let tmpl = OuterTemplate::new(&cfg);
         Self {
             cfg,
-            fabric,
+            fabric: Arc::new(ArcSwap::from_pointee(fabric)),
             nat,
             tmpl,
             ip_id: 0,
             stats: PipelineStats::default(),
         }
+    }
+
+    /// Atomically replace the fabric map without stopping the forwarding loop. Safe to
+    /// call from another thread (e.g. the control-plane server) while the data path is
+    /// running — in-flight packets finish against the old map, the next reads see the
+    /// new one. Takes `&self`: no exclusive access to the pipeline is required.
+    pub fn reload_fabric(&self, new: Fabric) {
+        self.fabric.store(Arc::new(new));
+    }
+
+    /// A cloneable handle to the hot-swappable fabric, so a control-plane thread can
+    /// call [`ArcSwap::store`] on it to reload the map that this pipeline reads.
+    #[must_use]
+    pub fn fabric_handle(&self) -> Arc<ArcSwap<Fabric>> {
+        Arc::clone(&self.fabric)
     }
 
     #[must_use]
@@ -249,7 +269,7 @@ impl Pipeline {
         let mut flow = flow_hash_of(&ip);
 
         // Decide next hop *within this VNI*, or default route to the gateway.
-        let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(vni, inner_dst) {
+        let (dst_node, new_dst_mac, do_snat) = match self.fabric.load().resolve(vni, inner_dst) {
             Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
             None => match self.cfg.gateway_node_ip {
                 Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
@@ -379,13 +399,14 @@ impl Pipeline {
             };
         }
 
-        let (dst_node, new_dst_mac, do_snat) = match self.fabric.resolve(self.cfg.vni, inner_dst) {
-            Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
-            None => match self.cfg.gateway_node_ip {
-                Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
-                None => return self.drop("no-route"),
-            },
-        };
+        let (dst_node, new_dst_mac, do_snat) =
+            match self.fabric.load().resolve(self.cfg.vni, inner_dst) {
+                Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
+                None => match self.cfg.gateway_node_ip {
+                    Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
+                    None => return self.drop("no-route"),
+                },
+            };
 
         if let Some(m) = new_dst_mac {
             frame[ioff..ioff + 6].copy_from_slice(&m.0);
@@ -460,7 +481,7 @@ impl Pipeline {
             }
 
             let (dst_node, new_dst_mac, do_snat) =
-                match self.fabric.resolve(self.cfg.vni, inner_dst) {
+                match self.fabric.load().resolve(self.cfg.vni, inner_dst) {
                     Some(nh) => (nh.node_ip, Some(nh.inner_mac), false),
                     None => match self.cfg.gateway_node_ip {
                         Some(gw) => (gw, None, self.cfg.nat_ip.is_some()),
@@ -556,7 +577,7 @@ impl Pipeline {
             Ok(Some(d)) => {
                 // Accept any VNI this switch serves (its configured one, or any VPC
                 // present in the fabric) — a multi-VPC switch decaps them all.
-                if d.header.vni != self.cfg.vni && self.fabric.vpc(d.header.vni).is_none() {
+                if d.header.vni != self.cfg.vni && self.fabric.load().vpc(d.header.vni).is_none() {
                     return self.drop("wrong-vni");
                 }
                 if out.len() < d.inner.len() {
@@ -754,6 +775,48 @@ mod tests {
         assert_eq!(ip.protocol(), proto::ICMP);
         assert!(ip.checksum_valid());
         assert_eq!(u16::from_be_bytes([ip.payload()[6], ip.payload()[7]]), 1450);
+    }
+
+    #[test]
+    fn fabric_hot_reload_reroutes_without_rebuild() {
+        let mut p = two_node_pipeline(); // 10.0.0.20 -> node 192.168.1.2
+        let frame = tenant_udp_frame("10.0.0.9", "10.0.0.20", 1, 2, b"hi");
+        let mut out = vec![0u8; 2048];
+
+        let n = match p.encap_for_vni(&frame, &mut out, 1, 100) {
+            Decision::Forward(n) => n,
+            o => panic!("{o:?}"),
+        };
+        let d = overlay::decap(&out[..n]).unwrap().unwrap();
+        assert_eq!(d.outer_dst_ip, "192.168.1.2".parse::<Ipv4Addr>().unwrap());
+
+        // Hot-swap a fabric that routes the SAME inner IP to a different node — through
+        // `&self`, without rebuilding the pipeline or stopping the loop.
+        let mut fab2 = Fabric::new("192.168.1.1".parse().unwrap());
+        fab2.add_vpc(Vpc {
+            vni: 100,
+            name: "t".into(),
+            cidr: ("10.0.0.0".parse().unwrap(), 24),
+        });
+        fab2.add_endpoint(Endpoint {
+            vni: 100,
+            inner_ip: "10.0.0.20".parse().unwrap(),
+            inner_mac: mac(0x20),
+            node_ip: "192.168.1.9".parse().unwrap(),
+            local: false,
+        });
+        p.reload_fabric(fab2);
+
+        let n2 = match p.encap_for_vni(&frame, &mut out, 1, 100) {
+            Decision::Forward(n) => n,
+            o => panic!("{o:?}"),
+        };
+        let d2 = overlay::decap(&out[..n2]).unwrap().unwrap();
+        assert_eq!(
+            d2.outer_dst_ip,
+            "192.168.1.9".parse::<Ipv4Addr>().unwrap(),
+            "hot-reload must reroute to the new endpoint"
+        );
     }
 
     #[test]

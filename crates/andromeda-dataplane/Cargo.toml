@@ -10,6 +10,7 @@ build = "build.rs"
 andromeda-core = { workspace = true }
 andromeda-nat = { workspace = true }
 andromeda-control = { workspace = true }
+arc-swap = { workspace = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
