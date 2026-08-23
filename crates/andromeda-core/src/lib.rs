@@ -18,6 +18,7 @@ use std::net::Ipv4Addr;
 pub mod arp;
 pub mod checksum;
 pub mod ethernet;
+pub mod icmp;
 pub mod ipv4;
 pub mod overlay;
 pub mod tcp;

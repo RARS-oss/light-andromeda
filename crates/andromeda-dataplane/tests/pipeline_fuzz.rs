@@ -32,6 +32,8 @@ fn pipeline() -> Pipeline {
         gateway_node_ip: Some("192.168.1.254".parse().unwrap()),
         virtual_gateway_mac: MacAddr([2, 0, 0, 0, 0, 0xff]),
         outer_udp_checksum: false,
+        underlay_mtu: 1500,
+        virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
     };
     Pipeline::new(
         cfg,

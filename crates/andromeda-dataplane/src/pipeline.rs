@@ -17,6 +17,7 @@
 
 use andromeda_control::Fabric;
 use andromeda_core::ethernet::{self, EthFrame, MacAddr};
+use andromeda_core::icmp;
 use andromeda_core::ipv4::Ipv4View;
 use andromeda_core::overlay;
 use andromeda_core::{arp, five_tuple_of};
@@ -49,6 +50,14 @@ pub struct PipelineConfig {
     /// legal for IPv4 tunnels per RFC 6935 and standard for VXLAN) keeps the hot path
     /// off a full pass over the payload. Set `true` for strict outer integrity.
     pub outer_udp_checksum: bool,
+    /// Underlay path MTU in bytes (the largest outer IP datagram the fabric carries;
+    /// typically 1500). Drives overlay Path-MTU Discovery: a tenant `DF` datagram that
+    /// would not fit under the 50-byte overlay header triggers an ICMP "Fragmentation
+    /// Needed" back to the tenant (RFC 1191) instead of a silent blackhole.
+    pub underlay_mtu: u16,
+    /// The inner IP the distributed gateway sources its PMTUD/ICMP replies from — the
+    /// tenant's default-gateway address.
+    pub virtual_gateway_ip: Ipv4Addr,
 }
 
 /// The outcome of feeding one frame to the pipeline.
@@ -71,6 +80,8 @@ pub struct PipelineStats {
     pub decapped: u64,
     pub natted: u64,
     pub arp_replied: u64,
+    /// ICMP "Fragmentation Needed" (PMTUD) replies sent back to tenants.
+    pub pmtud_replied: u64,
     pub dropped: u64,
     pub passed: u64,
 }
@@ -245,6 +256,29 @@ impl Pipeline {
                 None => return self.drop("no-route"),
             },
         };
+
+        // Overlay Path-MTU Discovery: a tenant `DF` datagram too large to fit under the
+        // 50-byte overlay header on the underlay MTU must not be silently blackholed —
+        // reply with ICMP "Fragmentation Needed" (RFC 1191) so the tenant lowers its MSS.
+        let inner_mtu = self
+            .cfg
+            .underlay_mtu
+            .saturating_sub(overlay::OVERLAY_OVERHEAD as u16);
+        if ip.dont_fragment() && ip.total_length() > inner_mtu {
+            return match icmp::write_frag_needed(
+                out,
+                inner,
+                self.cfg.virtual_gateway_mac,
+                self.cfg.virtual_gateway_ip,
+                inner_mtu,
+            ) {
+                Ok(n) => {
+                    self.stats.pmtud_replied += 1;
+                    Decision::Reply(n)
+                }
+                Err(_) => self.drop("pmtud-build"),
+            };
+        }
 
         // Place the inner frame directly in the output buffer (the single copy),
         // then build the overlay header in front of it.
@@ -583,9 +617,74 @@ mod tests {
             gateway_node_ip: None,
             virtual_gateway_mac: mac(0xff),
             outer_udp_checksum: false,
+            underlay_mtu: 1500,
+            virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
         };
         let nat = NatEngine::new("203.0.113.7".parse().unwrap(), 20000, 20100);
         Pipeline::new(cfg, fabric, nat)
+    }
+
+    #[test]
+    fn pmtud_oversize_df_replies_with_icmp() {
+        let mut p = two_node_pipeline();
+        // Inner IP datagram = 20 + 8 + 1500 = 1528 bytes, larger than 1450 (the 1500-byte
+        // underlay MTU minus the 50-byte overlay header), and DF is set by the builder.
+        let frame = tenant_udp_frame("10.0.0.9", "10.0.0.20", 1111, 2222, &vec![0x41u8; 1500]);
+        let mut out = vec![0u8; 2048];
+        let n = match p.encap_for_vni(&frame, &mut out, 1, 100) {
+            Decision::Reply(n) => n,
+            o => panic!("expected ICMP Reply, got {o:?}"),
+        };
+        assert_eq!(p.stats().pmtud_replied, 1);
+        assert_eq!(
+            p.stats().encapped,
+            0,
+            "the oversize frame must not be encapsulated"
+        );
+
+        // The reply is an ICMP Fragmentation-Needed back to the tenant, mtu = 1450.
+        let eth = EthFrame::parse(&out[..n]).unwrap();
+        assert_eq!(eth.dst(), mac(0xaa)); // back to the original tenant source MAC
+        let ip = Ipv4View::parse(eth.payload()).unwrap();
+        assert_eq!(ip.protocol(), proto::ICMP);
+        assert_eq!(ip.dst(), "10.0.0.9".parse::<Ipv4Addr>().unwrap()); // original source
+        assert_eq!(ip.src(), "10.0.0.1".parse::<Ipv4Addr>().unwrap()); // virtual gateway
+        assert!(ip.checksum_valid());
+        let icmp = ip.payload();
+        assert_eq!(icmp[0], 3); // destination unreachable
+        assert_eq!(icmp[1], 4); // fragmentation needed
+        assert_eq!(u16::from_be_bytes([icmp[6], icmp[7]]), 1450);
+    }
+
+    #[test]
+    fn pmtud_oversize_without_df_encapsulates() {
+        let mut p = two_node_pipeline();
+        let mut frame = tenant_udp_frame("10.0.0.9", "10.0.0.20", 1111, 2222, &vec![0x41u8; 1500]);
+        // Clear the inner DF bit and fix the IPv4 header checksum: without DF, the switch
+        // does not send PMTUD — it forwards (fragmentation would be handled downstream).
+        frame[20] &= !0x40;
+        frame[24] = 0;
+        frame[25] = 0;
+        let c = andromeda_core::checksum::checksum(&frame[14..34]);
+        frame[24..26].copy_from_slice(&c.to_be_bytes());
+        let mut out = vec![0u8; 2048];
+        assert!(matches!(
+            p.encap_for_vni(&frame, &mut out, 1, 100),
+            Decision::Forward(_)
+        ));
+        assert_eq!(p.stats().pmtud_replied, 0);
+    }
+
+    #[test]
+    fn pmtud_normal_frame_encapsulates() {
+        let mut p = two_node_pipeline();
+        let frame = tenant_udp_frame("10.0.0.9", "10.0.0.20", 1111, 2222, b"hello");
+        let mut out = vec![0u8; 2048];
+        assert!(matches!(
+            p.encap_for_vni(&frame, &mut out, 1, 100),
+            Decision::Forward(_)
+        ));
+        assert_eq!(p.stats().pmtud_replied, 0);
     }
 
     #[test]
@@ -615,6 +714,8 @@ mod tests {
             gateway_node_ip: None,
             virtual_gateway_mac: mac(0xff),
             outer_udp_checksum: false,
+            underlay_mtu: 1500,
+            virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
         };
         let mut p = Pipeline::new(
             cfg,

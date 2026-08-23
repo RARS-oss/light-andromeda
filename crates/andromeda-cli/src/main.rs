@@ -85,6 +85,8 @@ fn selftest() {
         gateway_node_ip: None,
         virtual_gateway_mac: MacAddr([0x02, 0, 0, 0, 0, 0xff]),
         outer_udp_checksum: false,
+        underlay_mtu: 1500,
+        virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
     };
     let mut p = Pipeline::new(
         cfg,
@@ -630,6 +632,8 @@ fn build_pipeline(east_west: bool, snat: bool) -> Pipeline {
         },
         virtual_gateway_mac: MacAddr([0x02, 0, 0, 0, 0, 0xff]),
         outer_udp_checksum: false,
+        underlay_mtu: 1500,
+        virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
     };
     Pipeline::new(
         cfg,
@@ -753,6 +757,8 @@ fn run_cmd(args: &[String]) {
         gateway_node_ip: Some(peer_node),
         virtual_gateway_mac: MacAddr([0x02, 0, 0, 0, 0, 0xff]),
         outer_udp_checksum: false,
+        underlay_mtu: 1500,
+        virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
     };
     let nat = NatEngine::new(nat_ip.unwrap_or(local_node), 20000, 60000);
     let mut pipeline = Pipeline::new(cfg, fabric, nat);
@@ -879,6 +885,8 @@ fn switch_cmd(args: &[String]) {
             gateway_node_ip: nc.peer_node,
             virtual_gateway_mac: nc.virtual_gateway_mac,
             outer_udp_checksum: false,
+            underlay_mtu: 1500,
+            virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
         };
         let nat = NatEngine::new(nc.nat_ip.unwrap_or(nc.local_node), 20000, 60000);
         (nc.build_fabric(), cfg, nat)
@@ -898,6 +906,8 @@ fn switch_cmd(args: &[String]) {
             gateway_node_ip: Some(peer_node),
             virtual_gateway_mac: MacAddr([0x02, 0, 0, 0, 0, 0xff]),
             outer_udp_checksum: false,
+            underlay_mtu: 1500,
+            virtual_gateway_ip: "10.0.0.1".parse().unwrap(),
         };
         let nat = NatEngine::new(nat_ip.unwrap_or(local_node), 20000, 60000);
         (fabric, cfg, nat)
