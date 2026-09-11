@@ -16,3 +16,8 @@ Cargo.lock.orig
 # Local scratch
 /scratch
 *.pcap
+
+# local secrets
+.env
+.env.*
+!.env.example
